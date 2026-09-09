@@ -25,8 +25,32 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 import { app } from 'electron';
+import { extensionBridgePorts, DEFAULT_BRIDGE_PORTS } from './profile.js';
 
 const MATERIALIZED_FINGERPRINT = '.chat-on-steroids-source';
+
+function customizeBridgePorts(dir: string, ports: readonly number[]): void {
+  if (ports.length === DEFAULT_BRIDGE_PORTS.length && ports.every((port, index) => port === DEFAULT_BRIDGE_PORTS[index])) return;
+
+  const backgroundPath = path.join(dir, 'background.js');
+  const source = readFileSync(backgroundPath, 'utf8');
+  const replaced = source.replace(
+    /const PORTS = \[[^\]]+\];/,
+    `const PORTS = ${JSON.stringify(ports)};`
+  );
+  if (replaced === source) throw new Error('Extension bridge port declaration was not found');
+  writeFileSync(backgroundPath, replaced, 'utf8');
+
+  const manifestPath = path.join(dir, 'manifest.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { host_permissions?: string[] };
+  const existing = Array.isArray(manifest.host_permissions) ? manifest.host_permissions : [];
+  const withoutLoopback = existing.filter((entry) => !/^http:\/\/127\.0\.0\.1:\d+\/\*$/.test(entry));
+  manifest.host_permissions = [
+    ...withoutLoopback,
+    ...ports.map((port) => `http://127.0.0.1:${port}/*`)
+  ];
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+}
 
 function extensionFingerprint(root: string): string {
   const hash = createHash('sha256');
@@ -110,7 +134,12 @@ function materializePackagedExtension(bundled: string, stable: string): string |
   // damaged after a successful earlier materialization, keep exposing the last-known-good stable
   // folder so Chrome and Finder do not lose a working extension merely because refresh is broken.
   if (!validExtension(bundled)) return validExtension(stable) ? stable : null;
-  const fingerprint = extensionFingerprint(bundled);
+  const ports = extensionBridgePorts();
+  const fingerprint = createHash('sha256')
+    .update(extensionFingerprint(bundled))
+    .update('\0bridge-ports\0')
+    .update(ports.join(','))
+    .digest('hex');
   if (validExtension(stable) && materializedFingerprint(stable) === fingerprint) return stable;
   rmSync(stage, { recursive: true, force: true });
 
@@ -118,6 +147,7 @@ function materializePackagedExtension(bundled: string, stable: string): string |
   try {
     cpSync(bundled, stage, { recursive: true, force: true });
     if (!validExtension(stage)) throw new Error('Staged extension is missing manifest.json');
+    customizeBridgePorts(stage, ports);
     writeFileSync(path.join(stage, MATERIALIZED_FINGERPRINT), fingerprint, { encoding: 'utf8', mode: 0o600 });
 
     // Only now do we have both a complete replacement and whatever last-known-good published

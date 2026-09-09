@@ -74,6 +74,7 @@ import {
 } from './window-lifecycle.js';
 import { trayGuidArgsForPlatform, trayImageSpec } from './tray-image.js';
 import { browserWindowIconPath } from './window-icon.js';
+import { applyProfilePaths, profileLabel } from './profile.js';
 import { editContextMenuTemplate } from './edit-context-menu.js';
 
 /** Durable state file holding the multi-agent run. Hashes only, never credentials. */
@@ -86,6 +87,11 @@ let quitting = false;
 let shutdownStarted = false;
 let shutdownComplete = false;
 let stopSessionRetention: (() => void) | null = null;
+
+// Owner multi-profile fork: profile the complete Electron data root before the singleton lock.
+// With no COS_HOME this is a strict no-op and upstream's ordinary installation layout is kept.
+applyProfilePaths(app);
+const activeProfileLabel = profileLabel();
 
 // One instance only: two copies would fight over the tunnel and the config file.
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -112,7 +118,7 @@ function createWindow(): void {
     } : {}),
     // Painted before the renderer loads, so a dark window never flashes white.
     backgroundColor: getConfig().ui.theme === 'dark' ? '#0e0e11' : '#ffffff',
-    title: 'Chat On Steroids',
+    title: activeProfileLabel ? `Chat On Steroids — ${activeProfileLabel}` : 'Chat On Steroids',
     webPreferences: {
       zoomFactor: UI_BASE_ZOOM,
       preload: path.join(__dirname, '../preload/index.js'),
@@ -258,7 +264,8 @@ function refreshTray(): void {
   const running = connected || offline;
   const label = connected ? 'Connected' : offline ? 'No internet' : 'Not connected';
   tray.setImage(trayIcon(running));
-  tray.setToolTip(`Chat On Steroids — ${label.toLowerCase()}`);
+  const prefix = activeProfileLabel ? `Chat On Steroids [${activeProfileLabel}]` : 'Chat On Steroids';
+  tray.setToolTip(`${prefix} — ${label.toLowerCase()}`);
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label, enabled: false },

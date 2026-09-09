@@ -254,6 +254,26 @@ describe('browser-backed ChatGPT commands', () => {
     }]);
   });
 
+  it('pins an orchestration URL to the exact owner browser profile when configured', async () => {
+    const browser = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+    const calls: Array<{ command: string; args: readonly string[]; cwd: string }> = [];
+    const url = 'https://chatgpt.com/?clf=worker-marker';
+    await openInPreferredBrowser(url, {
+      platform: 'darwin',
+      env: { COS_BROWSER_USER_DATA_DIR: '/Users/example/AI-Runtimes/cos/account-b/browser' },
+      usable: (candidate) => candidate === browser,
+      launch: async (command, args, cwd) => {
+        calls.push({ command, args, cwd });
+        return { pid: 900 };
+      }
+    });
+    expect(calls).toEqual([{
+      command: browser,
+      args: ['--user-data-dir=/Users/example/AI-Runtimes/cos/account-b/browser', url],
+      cwd: '/Applications/Google Chrome.app/Contents/MacOS'
+    }]);
+  });
+
   it('passes only the orchestration URL to a Linux browser, never the AppImage sandbox fallback', async () => {
     const flatpakChrome = '/var/lib/flatpak/exports/bin/com.google.Chrome';
     const calls: Array<{ command: string; args: readonly string[]; cwd: string }> = [];
