@@ -1,0 +1,12 @@
+{
+  "browserFamily": "chrome",
+  "profileDirectory": "Profile 86",
+  "profileDisplayName": "Profile 86",
+  "appExecutable": "/Applications/Chat On Steroids.app/Contents/MacOS/Chat On Steroids",
+  "failClosed": true,
+  "evidence": {
+    "resolvedAt": "2026-09-12",
+    "candidateProfile86ChatgptHistoryRows": 1125,
+    "candidateProfile87ChatgptHistoryRows": 2
+  }
+}

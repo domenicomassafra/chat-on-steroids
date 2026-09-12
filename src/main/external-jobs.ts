@@ -88,6 +88,7 @@ async function failJob(jobDir: string, error: unknown): Promise<void> {
 
 function workerTask(promptPath: string, responsePath: string, donePath: string): string {
   return [
+    '@Chat On Steroids Core',
     'You are a Chat On Steroids worker executing a file-backed external-agent job.',
     `Read the complete instructions from ${promptPath}.`,
     'Execute them fully using the tools available to you.',

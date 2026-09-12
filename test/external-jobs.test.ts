@@ -10,7 +10,7 @@ const stage = {
   commit: vi.fn(),
   rollback: vi.fn()
 };
-const stageSpawn = vi.fn(() => stage);
+const stageSpawn = vi.fn((_request: { workers: Array<{ task: string }> }) => stage);
 const persistCriticalSwarmNow = vi.fn(async () => true);
 const requestWorkerBootstraps = vi.fn();
 
@@ -58,6 +58,9 @@ describe('external subagent jobs', () => {
       caller: { conversationId: EXTERNAL_PRIME_CONVERSATION_ID },
       workers: [expect.objectContaining({ model: 'gpt-5.6', reasoning_effort: 'high' })]
     }));
+    const worker = stageSpawn.mock.calls[0]![0].workers[0]!;
+    expect(worker.task.split('\n')[0]).toBe('@Chat On Steroids Core');
+    expect(worker.task).toContain(`Read the complete instructions from ${path.join(dir, 'prompt.md')}.`);
     expect(persistCriticalSwarmNow).toHaveBeenCalledTimes(1);
     expect(stage.commit).toHaveBeenCalledTimes(1);
     expect(stage.rollback).not.toHaveBeenCalled();

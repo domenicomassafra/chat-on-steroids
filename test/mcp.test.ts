@@ -3639,7 +3639,14 @@ describe('exec sessions belong to the chat that opened them', () => {
 
     const after = await asChat('wfr_background_owner', 'read', { paths: ['/workspace/src/app.ts'] });
     expect(textOf(after)).not.toContain(`Background session ${sessionId}`);
-    expect(unifiedExecManager.exitedUnread(owned)).toEqual([]);
+    // Receipt publication and the HTTP response complete on adjacent async turns. Under the
+    // full parallel suite the response can win that race by a few milliseconds even though the
+    // receipt is already committed to complete. Assert the eventual contract rather than one
+    // scheduler tick.
+    await vi.waitFor(() => expect(unifiedExecManager.exitedUnread(owned)).toEqual([]), {
+      timeout: 1_000,
+      interval: 10
+    });
   });
 
   it('reoffers completed output after the real HTTP connection closes before publication', async () => {
@@ -3684,7 +3691,10 @@ describe('exec sessions belong to the chat that opened them', () => {
     expect(unifiedExecManager.exitedUnread(new Set([id]))).toHaveLength(1);
     const receipt = await asChat(requestId, 'read', { paths: ['/workspace/src/app.ts'] });
     expect(textOf(receipt)).not.toContain('transport-replay');
-    expect(unifiedExecManager.exitedUnread(new Set([id]))).toEqual([]);
+    await vi.waitFor(() => expect(unifiedExecManager.exitedUnread(new Set([id]))).toEqual([]), {
+      timeout: 1_000,
+      interval: 10
+    });
   });
 
   it('refuses new commands at the unread-result bound, delivers a result, then admits after automatic receipt', async () => {

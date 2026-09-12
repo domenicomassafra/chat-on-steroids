@@ -25,6 +25,7 @@ import {
   RG_VALUE_FLAGS,
   benignExitNote,
   bindBundledRipgrep,
+  reassertBundledRipgrepPath,
   execRecoveryHints,
   nonZeroExitIsBenign,
   normalizePowerShellOperators,
@@ -258,6 +259,19 @@ describe('a non-zero exit that is a result rather than a failure', () => {
     expect(bindBundledRipgrep('rg foo', 'bash', "/tmp/it's/rg")).toBe("'/tmp/it'\\''s/rg' foo");
     expect(bindBundledRipgrep('/usr/bin/rg foo', 'bash', posix)).toBe('/usr/bin/rg foo');
     expect(bindBundledRipgrep('rg foo', 'cmd', bundled)).toBe('rg foo');
+  });
+
+  it('reasserts the bundled rg directory only after POSIX login profiles can mutate PATH', () => {
+    const rg = "/Applications/Chat On Steroids/resources/rg/rg";
+    expect(reassertBundledRipgrepPath('command -v rg', 'zsh', rg, true)).toBe(
+      `export PATH='/Applications/Chat On Steroids/resources/rg':"$PATH"; command -v rg`
+    );
+    expect(reassertBundledRipgrepPath('command -v rg', 'bash', "/tmp/it's/rg", true)).toBe(
+      `export PATH='/tmp/it'\\''s':"$PATH"; command -v rg`
+    );
+    expect(reassertBundledRipgrepPath('command -v rg', 'zsh', rg, false)).toBe('command -v rg');
+    expect(reassertBundledRipgrepPath('command -v rg', 'powershell', rg, true)).toBe('command -v rg');
+    expect(reassertBundledRipgrepPath('command -v rg', 'cmd', rg, true)).toBe('command -v rg');
   });
 
   it('hides a leading dot from a pattern without one, and only then', () => {

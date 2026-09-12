@@ -9709,20 +9709,30 @@
     };
     if (await failIfRetargeted()) return;
     let insertionFailure = '';
-    if (!CLF_DOM.insertPrompt(boot.text, true, reason => { insertionFailure = reason; })) {
+    const coreConnector = '@Chat On Steroids Core';
+    const needsCoreConnector = boot.type === 'worker' &&
+      (boot.text === coreConnector || boot.text.startsWith(`${coreConnector}\n`));
+    const taskTail = needsCoreConnector ? boot.text.slice(coreConnector.length).replace(/^\n+/, '') : '';
+    const inserted = needsCoreConnector
+      ? await CLF_DOM.insertConnectorPrompt('Chat On Steroids Core', taskTail, stillOnTarget, reason => { insertionFailure = reason; })
+      : CLF_DOM.insertPrompt(boot.text, true, reason => { insertionFailure = reason; });
+    if (!inserted) {
       return void (await fail(`ChatGPT refused the inserted text${insertionFailure ? ` (${insertionFailure})` : ''}`));
     }
+    // Connector mentions are provider-owned rich nodes. Use the exact post-selection composer
+    // source for browser receipts while keeping boot.text as the command/task authority.
+    const submittedBootstrapText = String(CLF_DOM.composer()?.textContent || boot.text);
     const sendingBootstrap = submittedSendLifetime(target);
     // Stop/composer-clear may acknowledge acceptance before the authored row mounts.
     // Keep the original draft lease through that receipt, exactly as desktop delivery does;
     // identical text alone must never erase a later trusted edit or a replacement editor.
-    const bootstrapDraft = CLF_DOM.captureComposerDraft(boot.text, () => !attempt?.cancelled && sendingBootstrap());
+    const bootstrapDraft = CLF_DOM.captureComposerDraft(submittedBootstrapText, () => !attempt?.cancelled && sendingBootstrap());
     const priorBootstrapUser = CLF_DOM.messages().filter(message => message.role === 'user').at(-1)?.id;
     const clearAcknowledgedBootstrap = async acknowledged => {
       if (acknowledged?.ok !== true || acknowledged.data?.ok === false || !bootstrapDraft.current()) return;
       const receipt = await waitPageView(() => {
         const latest = CLF_DOM.messages().filter(message => message.role === 'user').at(-1);
-        return latest?.id !== priorBootstrapUser && matchesSubmittedUser(latest, boot.text);
+        return latest?.id !== priorBootstrapUser && matchesSubmittedUser(latest, submittedBootstrapText);
       }, () => !attempt?.cancelled && sendingBootstrap(), 15000);
       if (receipt) await bootstrapDraft.clear();
     };
@@ -9742,7 +9752,7 @@
     // whitespace-normalized value: a prefix proves insertion happened, but it would also
     // approve user text appended after focus moved into this tab.
     const squeeze = (value) => (value || '').replace(/\s+/g, '');
-    const expectedText = squeeze(boot.text);
+    const expectedText = squeeze(submittedBootstrapText);
     if (!composer || squeeze(composer.textContent) !== expectedText) {
       return void (await fail('ChatGPT replaced the composer while inserting the bootstrap'));
     }

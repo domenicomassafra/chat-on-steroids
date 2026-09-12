@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const source = readFileSync(new URL('../extension/chatgpt-dom.js', import.meta.url), 'utf8');
 interface DomApi {
   insertPrompt(text: string, mode?: boolean | 'append', failure?: (reason: string) => void): boolean;
+  insertConnectorPrompt(name: string, tail?: string, current?: () => boolean, failure?: (reason: string) => void): Promise<boolean>;
   enterProject(entry: { id: string; sourceConversationId: string }, current?: () => boolean): Promise<boolean>;
   composerActions(): { host: HTMLElement; before: HTMLElement | null } | null;
   generating(): boolean;
@@ -61,6 +62,41 @@ describe('one native HTML edit for prepared text', () => {
       return true;
     };
   });
+  it('selects the provider connector before appending the worker task', async () => {
+    box.textContent = '';
+    document.execCommand = (command, _ui, value) => {
+      const selection = document.getSelection();
+      if (!selection?.rangeCount || document.activeElement !== box) return false;
+      const range = selection.getRangeAt(0); range.deleteContents();
+      if (command === 'insertText') { range.insertNode(document.createTextNode(value || '')); }
+      else if (command === 'insertHTML') { const template = document.createElement('template'); template.innerHTML = value || ''; range.insertNode(template.content); }
+      else return false;
+      if (value === '@') {
+        const menu = document.createElement('div'); menu.setAttribute('role', 'listbox');
+        const option = document.createElement('button'); option.setAttribute('role', 'option');
+        option.innerHTML = '<span>Chat On Steroids Core</span><small>Local connector</small>';
+        option.addEventListener('click', () => { box.textContent = '@Chat On Steroids Core'; menu.remove(); });
+        menu.append(option); document.body.append(menu);
+      }
+      return true;
+    };
+    expect(await api.insertConnectorPrompt('Chat On Steroids Core', 'Run the file-backed job')).toBe(true);
+    expect(box.textContent).toContain('@Chat On Steroids Core');
+    expect(box.textContent).toContain('Run the file-backed job');
+  });
+  it('fails closed when the requested connector is absent', async () => {
+    box.textContent = '';
+    document.execCommand = (command, _ui, value) => {
+      if (command !== 'insertText' || value !== '@') return false;
+      box.textContent = '@'; return true;
+    };
+    const failed = vi.fn();
+    const result = api.insertConnectorPrompt('Chat On Steroids Core', 'Must not send', () => true, failed);
+    await vi.advanceTimersByTimeAsync(3500);
+    expect(await result).toBe(false);
+    expect(failed).toHaveBeenCalledWith('connector_choice_missing');
+  });
+
   it('hands a 96000-character multiline frame to the editor once without native per-line editing', () => {
     const value = ('Literal <abc> & "quoted" instructions.\n\n').repeat(2600).slice(0, 96000);
     const nativeEdit = vi.spyOn(document, 'execCommand');

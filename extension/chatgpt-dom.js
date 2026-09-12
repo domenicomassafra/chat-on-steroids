@@ -1678,6 +1678,85 @@ var CLF_DOM = (() => {
     }
   }
 
+  /**
+   * Selects a real ChatGPT connector mention in the composer, then appends the authored tail.
+   *
+   * A literal "@Name" text node is not connector authority. The provider owns that decision,
+   * so this writes only "@", waits for one visible provider choice whose own leaf names the
+   * connector exactly, clicks that native choice, and proves the composer changed before any
+   * remaining task text is inserted. Missing or ambiguous UI fails closed without Send.
+   */
+  async function insertConnectorPrompt(name, tail = '', stillCurrent = () => true, failure = () => undefined) {
+    const reject = reason => { safe(() => failure(reason), undefined); return false; };
+    const choiceFor = () => safe(() => {
+      const clickables = [...document.querySelectorAll(
+        'button, [role="option"], [role="menuitem"], [role="menuitemradio"], [cmdk-item], [data-radix-collection-item]'
+      )].filter(node =>
+        node.isConnected &&
+        displayed(node) &&
+        !node.closest(`${OWN_SURFACES}, ${TURN}, [data-message-author-role]`) &&
+        [...node.querySelectorAll('*')].concat(node).some(part =>
+          part.children.length === 0 && text(part, 160) === name
+        )
+      );
+      return clickables.length === 1 ? clickables[0] : null;
+    }, null);
+    const waitForChoice = () => new Promise(resolve => {
+      const immediate = choiceFor();
+      if (immediate) return resolve(immediate);
+      let done = false, observer = null, timer = null;
+      const finish = value => { if (done) return; done = true; observer?.disconnect(); clearTimeout(timer); resolve(value); };
+      const check = () => {
+        if (!stillCurrent()) return finish(null);
+        const choice = choiceFor();
+        if (choice) finish(choice);
+      };
+      observer = new MutationObserver(check);
+      observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
+      timer = setTimeout(() => finish(null), 3500);
+      check();
+    });
+    const waitForSelection = original => new Promise(resolve => {
+      let done = false, observer = null, timer = null;
+      const finish = value => { if (done) return; done = true; observer?.disconnect(); clearTimeout(timer); resolve(value); };
+      const check = () => {
+        if (!stillCurrent()) return finish(false);
+        const current = composer();
+        const value = String(current?.textContent || '');
+        if (current?.isConnected && value !== original && value.includes(name)) finish(true);
+      };
+      observer = new MutationObserver(check);
+      observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true });
+      timer = setTimeout(() => finish(false), 2500);
+      check();
+    });
+
+    const box = composer();
+    if (!box) return reject('composer_missing');
+    if ((box.textContent || '').trim() || hasComposerAttachments()) return reject('existing_draft');
+    if (!stillCurrent()) return reject('target_changed');
+    box.focus();
+    const selection = document.getSelection();
+    if (!selection) return reject('selection_missing');
+    selection.selectAllChildren(box);
+    if (!box.isConnected || composer() !== box || document.activeElement !== box) return reject('composer_not_focused');
+    const inserted = document.execCommand('insertText', false, '@') || document.execCommand('insertHTML', false, '@');
+    if (!inserted || String(box.textContent || '') !== '@') return reject('mention_trigger_rejected');
+    const choice = await waitForChoice();
+    if (!choice || !stillCurrent() || String(composer()?.textContent || '') !== '@') {
+      clearPromptExact('@');
+      return reject(choice ? 'target_changed' : 'connector_choice_missing');
+    }
+    choice.click();
+    if (!(await waitForSelection('@'))) {
+      if (String(composer()?.textContent || '') === '@') clearPromptExact('@');
+      return reject('connector_not_selected');
+    }
+    if (!stillCurrent()) return reject('target_changed');
+    if (tail && !insertPrompt(tail, 'append', failure)) return false;
+    return true;
+  }
+
   /** Clears only app-owned text that still exactly matches the value it inserted. */
   function clearPromptExact(value) {
     return safe(() => {
@@ -2277,6 +2356,7 @@ var CLF_DOM = (() => {
     hideProgress,
     replaceActivity,
     insertPrompt,
+    insertConnectorPrompt,
     clearPromptExact,
     send
   };

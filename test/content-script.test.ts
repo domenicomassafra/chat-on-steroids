@@ -331,13 +331,15 @@ async function harness(
     const selection = window.document.getSelection();
     if (!box || window.document.activeElement !== box || !selection) return false;
     if (command === 'selectAll') { selection.selectAllChildren(box); return true; }
-    if (!['delete', 'insertHTML'].includes(command) || !selection.rangeCount || !box.contains(selection.anchorNode) || !box.contains(selection.focusNode)) return false;
+    if (!['delete', 'insertHTML', 'insertText'].includes(command) || !selection.rangeCount || !box.contains(selection.anchorNode) || !box.contains(selection.focusNode)) return false;
     const range = selection.getRangeAt(0);
     range.deleteContents();
     if (command === 'insertHTML') {
       const template = window.document.createElement('template');
       template.innerHTML = value || '';
       range.insertNode(template.content);
+    } else if (command === 'insertText') {
+      range.insertNode(window.document.createTextNode(value || ''));
     }
     return true;
   };
@@ -11520,6 +11522,42 @@ describe('the fresh chat the app opened', () => {
     expect(failed).toMatchObject({ id: 'cmd-native-edit-diagnostic', error: 'ChatGPT refused the inserted text (native_edit_rejected)' });
     expect(failed?.error).not.toContain('Private test brief');
     expect(composerText(live.document)).toBe('');
+  });
+
+  it('selects Chat On Steroids Core as a native connector before sending an external worker bootstrap', async () => {
+    let submitted = '';
+    const task = 'Run the file-backed external job.';
+    live = await harness(
+      'https://chatgpt.com/?clf=cmd-core-connector',
+      {
+        redeem: () => ({ ok: true, command: {
+          id: 'cmd-core-connector', type: 'worker',
+          text: `@Chat On Steroids Core\n${task}`,
+          agent: 'worker-1'
+        } }),
+        ack: () => ({ ok: true })
+      },
+      (document, dom) => {
+        const box = document.querySelector('#prompt-textarea') as HTMLElement;
+        const menu = document.createElement('div'); menu.setAttribute('role', 'listbox');
+        const option = document.createElement('button'); option.setAttribute('role', 'option');
+        option.innerHTML = '<span>Chat On Steroids Core</span><small>Connector</small>';
+        option.addEventListener('click', () => { box.textContent = '@Chat On Steroids Core'; menu.remove(); });
+        menu.append(option); document.body.append(menu);
+        document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
+          submitted = composerText(document);
+          dom.reconfigure({ url: 'https://chatgpt.com/c/23232323-3434-4545-5656-676767676767' });
+          userTurn(document, 'accepted-core-worker', submitted, { sent: false });
+        });
+      }
+    );
+    await settle(500);
+    expect(submitted.startsWith('@Chat On Steroids Core')).toBe(true);
+    expect(submitted).toContain(task);
+    expect(live.document.querySelector('[role="listbox"]')).toBeNull();
+    expect(live.sent.filter(message => message.type === 'ack' && message.status === 'sent')).toEqual([
+      expect.objectContaining({ id: 'cmd-core-connector', agent: 'worker-1', conversationId: '23232323-3434-4545-5656-676767676767' })
+    ]);
   });
 
   it('sends a worker bootstrap whose task is shorter than the text it verifies', async () => {

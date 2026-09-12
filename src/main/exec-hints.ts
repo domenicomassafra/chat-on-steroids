@@ -699,6 +699,29 @@ export function bindBundledRipgrep(command: string, shellType: ShellType, execut
   return changed ? bound : command;
 }
 
+/**
+ * Reasserts the bundled-ripgrep PATH prefix after a POSIX login shell has loaded its profile.
+ *
+ * `childEnv()` deliberately prepends the shipped runtime, but `zsh -lc`/`bash -lc` are allowed
+ * to source the user's login files before executing our command. Homebrew and similar profile
+ * initialisers commonly prepend their own bin directory there, undoing the runtime contract.
+ * Keep the login shell (it is how user toolchains become available), then restore only the PATH
+ * prefix the child environment already promised. The wrapper is applied after apply-patch
+ * interception, so it cannot hide a patch invocation from that parser.
+ */
+export function reassertBundledRipgrepPath(
+  command: string,
+  shellType: ShellType,
+  executable: string | null,
+  useLoginShell: boolean
+): string {
+  if (!useLoginShell || !executable || !['zsh', 'bash', 'sh'].includes(shellType)) return command;
+  const separator = Math.max(executable.lastIndexOf('/'), executable.lastIndexOf('\\'));
+  if (separator <= 0) return command;
+  const directory = executable.slice(0, separator);
+  return `export PATH=${quotePosixArgument(directory)}:"$PATH"; ${command}`;
+}
+
 /** One literal POSIX-shell argument. Single quotes close/reopen around an embedded apostrophe. */
 function quotePosixArgument(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
