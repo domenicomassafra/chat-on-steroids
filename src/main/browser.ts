@@ -5,7 +5,7 @@ import { launchCommand, runCommand, runPowerShell } from './exec.js';
 import { getConfig } from './config.js';
 import type { ChatBrowser } from '../shared/types.js';
 import { browserWindowBounds } from './browser-window-layout.js';
-import { browserProfileDir } from './profile.js';
+import { browserProfileDir, browserProfileDirectory } from './profile.js';
 
 type Exists = (candidate: string) => boolean;
 type Launch = typeof launchCommand;
@@ -55,6 +55,8 @@ export interface PreferredBrowserOpenOptions {
   powershell?: typeof runPowerShell;
   /** Exact Chromium user-data root for an owner-isolated ChatGPT identity. */
   userDataDir?: string | null;
+  /** Exact Chromium profile directory inside that root, e.g. `Profile 86`. */
+  profileDirectory?: string | null;
 }
 
 function isExecutableBrowser(candidate: string, platform: NodeJS.Platform): boolean {
@@ -224,12 +226,16 @@ export async function openInPreferredBrowser(
   const userDataDir = options.userDataDir === undefined
     ? browserProfileDir(env, options.home ?? env.HOME ?? env.USERPROFILE ?? os.homedir())
     : options.userDataDir;
+  const profileDirectory = options.profileDirectory === undefined
+    ? browserProfileDirectory(env)
+    : options.profileDirectory;
   // These switches only affect a newly started Chrome process; handing a URL to an
   // existing instance cannot change its policy. Memory Saver exclusions alone do not
   // prevent background timer/renderer throttling of long-running orchestration tabs.
   const args = [
     ...(platform === 'win32' ? ['--disable-renderer-backgrounding', '--disable-background-timer-throttling'] : []),
     ...(userDataDir ? [`--user-data-dir=${userDataDir}`] : []),
+    ...(profileDirectory ? [`--profile-directory=${profileDirectory}`] : []),
     ...(options.backgroundStartup ? [`--window-size=${bounds.width},${bounds.height}`] : []),
     url
   ];

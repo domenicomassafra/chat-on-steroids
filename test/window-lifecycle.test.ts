@@ -155,12 +155,12 @@ describe('Windows login startup', () => {
     const handler = source.slice(start, source.indexOf('\n});', start) + 4);
     let received!: (event: unknown, argv: string[]) => void;
     const request = vi.fn();
-    vm.runInNewContext(handler, { app: { on: (_: string, listener: typeof received) => { received = listener; } }, windowActivation: { request }, isBackgroundLaunch });
+    vm.runInNewContext(handler, { app: { on: (_: string, listener: typeof received) => { received = listener; } }, windowActivation: { request }, acceptExternalJobArgv: () => undefined, isBackgroundLaunch, isExternalJobLaunch: (argv: string[]) => argv.some(value => value === '--cos-subagent-job' || value.startsWith('--cos-subagent-job=')) });
     received({}, ['app.exe', '--background']);
     expect(request).not.toHaveBeenCalled();
     received({}, ['app.exe']);
     expect(request).toHaveBeenCalledOnce();
     expect(isBackgroundLaunch(['app.exe', '--background=false'])).toBe(false);
-    expect(source).toContain('if (!isBackgroundLaunch(process.argv)) windowActivation.request();');
+    expect(source).toContain('if (!isBackgroundLaunch(process.argv) && !isExternalJobLaunch(process.argv)) windowActivation.request();');
   });
 });

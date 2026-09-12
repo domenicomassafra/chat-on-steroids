@@ -76,6 +76,7 @@ import { trayGuidArgsForPlatform, trayImageSpec } from './tray-image.js';
 import { browserWindowIconPath } from './window-icon.js';
 import { applyProfilePaths, profileLabel } from './profile.js';
 import { editContextMenuTemplate } from './edit-context-menu.js';
+import { dispatchExternalJob, externalJobDirsFromArgv, isExternalJobLaunch } from './external-jobs.js';
 
 /** Durable state file holding the multi-agent run. Hashes only, never credentials. */
 const SWARM_STATE = 'swarm';
@@ -87,6 +88,21 @@ let quitting = false;
 let shutdownStarted = false;
 let shutdownComplete = false;
 let stopSessionRetention: (() => void) | null = null;
+let externalJobAdmissionReady = false;
+const pendingExternalJobDirs = new Set<string>();
+
+function acceptExternalJobArgv(argv: readonly string[]): void {
+  for (const jobDir of externalJobDirsFromArgv(argv)) {
+    if (externalJobAdmissionReady) void dispatchExternalJob(jobDir);
+    else pendingExternalJobDirs.add(jobDir);
+  }
+}
+
+function openExternalJobAdmission(): void {
+  externalJobAdmissionReady = true;
+  for (const jobDir of pendingExternalJobDirs) void dispatchExternalJob(jobDir);
+  pendingExternalJobDirs.clear();
+}
 
 // Owner multi-profile fork: profile the complete Electron data root before the singleton lock.
 // With no COS_HOME this is a strict no-op and upstream's ordinary installation layout is kept.
@@ -288,7 +304,8 @@ function refreshTray(): void {
 }
 
 app.on('second-instance', (_event, argv) => {
-  if (!isBackgroundLaunch(argv)) windowActivation.request();
+  acceptExternalJobArgv(argv);
+  if (!isBackgroundLaunch(argv) && !isExternalJobLaunch(argv)) windowActivation.request();
 });
 
 void app.whenReady().then(async () => {
@@ -417,7 +434,7 @@ void app.whenReady().then(async () => {
     }
   );
   windowActivation.enable();
-  if (!isBackgroundLaunch(process.argv)) windowActivation.request();
+  if (!isBackgroundLaunch(process.argv) && !isExternalJobLaunch(process.argv)) windowActivation.request();
   // macOS `activate` can fire on first launch, so do not wire it at module load where it could
   // create a BrowserWindow before Electron is ready. Once the initial window path is established,
   // Dock activation/re-launch can safely recreate or focus it.
@@ -438,9 +455,16 @@ void app.whenReady().then(async () => {
   // The bridge serves recording and multi-agent mode both: recording needs the
   // extension to observe the chat, and multi-agent mode needs it to open worker tabs.
   // Either switch being on starts it. ipc.ts applies the same rule on a settings save.
+  acceptExternalJobArgv(process.argv);
   if (getConfig().sessions.record || getConfig().multiAgent.enabled) {
-    void startBridge();
+    const startingBridge = startBridge();
+    // A CLI-submitted job must not publish its worker before the bridge has registered the
+    // broker's spawn listener, otherwise the worker exists durably but no browser command is
+    // queued until some unrelated bridge restart. Ordinary startup remains non-blocking.
+    if (pendingExternalJobDirs.size > 0) await startingBridge;
+    else void startingBridge;
   }
+  openExternalJobAdmission();
   // Retention governs recordings already stored on disk, independent of whether recording is
   // currently enabled. The tray app can stay alive for days, so run once now and keep a coarse
   // maintenance timer rather than making expiry depend on the next process restart.

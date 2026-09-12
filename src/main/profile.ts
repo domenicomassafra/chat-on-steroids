@@ -23,6 +23,15 @@ export function browserProfileDir(
   return configured ? expandHome(configured, homeDir) : null;
 }
 
+/** Optional Chromium profile directory inside the selected user-data root, e.g. `Profile 86`. */
+export function browserProfileDirectory(env: NodeJS.ProcessEnv = process.env): string | null {
+  const configured = env.COS_BROWSER_PROFILE_DIRECTORY?.trim();
+  if (!configured) return null;
+  // Chromium profile directory names are one path segment. Refuse path traversal and switches.
+  if (configured.startsWith('-') || configured.includes('/') || configured.includes('\\') || configured.includes('\0')) return null;
+  return configured.slice(0, 120);
+}
+
 /**
  * Optional production profile root.
  *

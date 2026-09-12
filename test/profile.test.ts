@@ -2,7 +2,7 @@ import path from 'node:path';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { describe, expect, it, vi } from 'vitest';
-import { applyProfilePaths, bridgePorts, browserProfileDir, extensionBridgePorts, profileLabel, resolveProfilePaths } from '../src/main/profile.js';
+import { applyProfilePaths, bridgePorts, browserProfileDir, browserProfileDirectory, extensionBridgePorts, profileLabel, resolveProfilePaths } from '../src/main/profile.js';
 
 describe('owner production profiles', () => {
   it('preserves the upstream default when COS_HOME is absent', () => {
@@ -20,6 +20,13 @@ describe('owner production profiles', () => {
     expect(browserProfileDir({ COS_BROWSER_USER_DATA_DIR: '~/AI-Runtimes/cos/a/browser' }, '/Users/example'))
       .toBe('/Users/example/AI-Runtimes/cos/a/browser');
     expect(browserProfileDir({}, '/Users/example')).toBeNull();
+  });
+
+  it('accepts one exact Chromium profile directory and rejects path/switch injection', () => {
+    expect(browserProfileDirectory({ COS_BROWSER_PROFILE_DIRECTORY: 'Profile 86' })).toBe('Profile 86');
+    expect(browserProfileDirectory({ COS_BROWSER_PROFILE_DIRECTORY: '../Profile 86' })).toBeNull();
+    expect(browserProfileDirectory({ COS_BROWSER_PROFILE_DIRECTORY: '--incognito' })).toBeNull();
+    expect(browserProfileDirectory({})).toBeNull();
   });
 
   it('sets both Electron paths before the caller takes its singleton lock', () => {
