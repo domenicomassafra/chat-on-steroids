@@ -1,4 +1,5 @@
 import { applyLoginStartup, supportsLoginStartup } from './window-lifecycle.js';
+import { prepareSessionPrompt } from './session/prompt.js';
 import { noteChatOrigin } from './session/recorder.js';
 import { REASONING_EFFORTS } from '../shared/session.js';
 import { safeExternalLink } from '../shared/external-link.js';
@@ -49,14 +50,14 @@ import { forgetExposedSurface } from './mcp/server.js';
 import { runDiagnostics } from './diagnostics.js';
 import { formatLogAsJson, formatLogForClipboard, getLog, logInfo, onLog } from './logger.js';
 import { RESERVED_ROOT_NAMES, uniqueRootName, validateNewRoot, SandboxError, resolvePath } from './sandbox.js';
-import { addProject, listProjects } from './projects.js';
+import { addProject, listProjects, removeProject } from './projects.js';
 import { hasSecret, isEncryptionAvailable, secureStorageStatus, setSecret } from './secrets.js';
 import { bundledVersion, locateBinary } from './tunnel/locate.js';
 import { TUNNEL_ID_PATTERN } from './tunnel/index.js';
 import {
   bridgeStatus,
   sessionActivityExpiresAt,
-  sessionHasInputActivity,
+  sessionInputActivity,
   sessionControlsFor, stopSessionTurn, setSessionAutomation, setSessionObjective, compactSession, cancelSessionCompaction,
   cancelWorkerCommands,
   chatUrl,
@@ -517,6 +518,12 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
   });
 
   handle('projects:list', () => listProjects());
+  handle('projects:remove', async (payload) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(payload);
+    const project = await removeProject(id);
+    push('session:changed');
+    return project;
+  });
   handle('projects:add', async () => {
     const window = getWindow();
     if (!window) throw new Error('No window');
@@ -1009,7 +1016,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     target.webContents.send(channel, ...args);
   };
   configureInputDelivery({
-    hasActivity: sessionHasInputActivity,
+    activity: sessionInputActivity,
     wakeDecision: async (entry, signal) => {
       signal.throwIfAborted();
       if (!await startBridge()) throw new Error('The browser bridge could not start');
@@ -1025,12 +1032,15 @@ export function registerIpc(getWindow: () => BrowserWindow | null, quitToInstall
     },
     changed: () => push('session:changed'),
     recordDelivered: (entry) => getConfig().sessions.record ? recordDeliveredInput(entry) : Promise.resolve(true),
-    prepareText: (entry) => {
+    prepareText: async (entry, limits) => {
       const control = entry.conversationId ? goalSwitchFor(entry.conversationId) : getConfig().goal;
       const mode = entry.automation ?? (control.enabled ? control.mode : 'off');
       const text = mode === 'goal' && goalBackendFor('goal') === 'templates' && !entry.text.includes(GOAL_MARKER_INSTRUCTION)
         ? entry.text + GOAL_MARKER_INSTRUCTION : entry.text;
-      return text;
+      // Only the opening user input owns executor setup. Existing chats, queued
+      // checkpoints and automatic continuations already have their instructions.
+      return !entry.sessionId && !entry.conversationId && !entry.finishOwner && entry.mode !== 'finish'
+        ? prepareSessionPrompt(text, entry, limits) : text;
     },
     applyAutomation: async (conversationId, automation, phase, objective) => {
       // This message supersedes the old final; never pick that old final up merely

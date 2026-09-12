@@ -9,7 +9,7 @@ import { getConfig, initConfigPath, loadConfig } from './config.js';
 import { connect, disconnect, getStatus, onStatusChange, shutdownConnection } from './connection.js';
 import { registerIpc } from './ipc.js';
 import { getChatModels, restoreChatModels, startChatModelDiscovery } from './chat-models.js';
-import { initLogFile, logError, logInfo, logWarn } from './logger.js';
+import { flushLogBeforeExit, initLogFile, logError, logInfo, logWarn, snapshotLogOnCrash } from './logger.js';
 import { unifiedExecManager } from './codex/manager.js';
 import { initSecretsPath } from './secrets.js';
 import { pluginManager } from './plugins/manager.js';
@@ -158,7 +158,13 @@ function createWindow(): void {
   window.once('ready-to-show', () => {
     // A renderer can finish loading after Cmd+Q has already entered bounded teardown. Never let
     // that late native event make the app visible again while `will-quit` is draining.
-    if (!quitting) showWindow();
+    if (!quitting) {
+      // Newly created windows intentionally start maximized. Keep that startup-only presentation
+      // here so later tray/Dock/native activation can show an existing user-sized window without
+      // overwriting its geometry.
+      if (!window?.isFullScreen()) window?.maximize();
+      showWindow();
+    }
   });
 
   // A renderer that fails to load leaves a blank window with no other clue, so
@@ -222,9 +228,6 @@ function showWindow(): void {
     return;
   }
   if (window.isMinimized()) window.restore();
-  // Apply maximization before showing the window so startup has the native maximized
-  // frame from its first visible paint. Preserve a user's explicit F11 fullscreen choice.
-  if (!window.isFullScreen()) window.maximize();
   window.show();
   window.focus();
 }
@@ -314,6 +317,9 @@ void app.whenReady().then(async () => {
   if (!shouldBeginAppBootstrap(hasSingleInstanceLock, quitting)) return;
   const userData = app.getPath('userData');
   initLogFile(path.join(userData, 'app.log'));
+  process.on('uncaughtExceptionMonitor', (error, origin) => {
+    snapshotLogOnCrash(`${origin}: ${error.stack ?? error.message}`);
+  });
   initConfigPath(userData);
   initSecretsPath(userData);
   initSessionStore(userData);
@@ -545,8 +551,11 @@ app.on('will-quit', (event) => {
       // continuation that ends this sequence is dropped by Electron, and the app is left
       // running with nothing to click and the single-instance lock still held.
       exit: () => {
-        shutdownComplete = true;
-        app.exit(0);
+        // The sequence has just logged its completion; a phase inside it would flush too early.
+        void flushLogBeforeExit().finally(() => {
+          shutdownComplete = true;
+          app.exit(0);
+        });
       }
     }
   );
