@@ -303,6 +303,23 @@ globalThis.probe = { placeSuccessorChat, projectFromUrl, successorChatBase };`, 
     expect(h.created[0]!.url!.startsWith('https://chatgpt.com/?')).toBe(true);
   });
 
+  it('opens a fresh root chat for a worker whose external prime has no real ChatGPT conversation id', async () => {
+    const h = worker(null);
+    await h.api.placeSuccessorChat(offer({
+      id: 'cmd-external-worker',
+      homeConversationId: 'local:chat-on-steroids-subagent:v1',
+      active: false,
+      model: 'gpt-5.6-sol',
+      reasoningEffort: 'high'
+    }), null);
+    expect(h.created).toHaveLength(1);
+    expect(h.created[0]!.url!.startsWith('https://chatgpt.com/?')).toBe(true);
+    expect(h.created[0]!.url).toContain('clf=cmd-external-worker');
+    expect(h.created[0]!.url).toContain('model=gpt-5.6-sol');
+    expect(h.created[0]!.url).toContain('reasoning_effort=high');
+    expect(h.created[0]!.url).not.toContain('/c/local%3A');
+  });
+
   it('leaves a chat outside any Project exactly where it was created before', async () => {
     const h = worker({ id: 7, url: `https://chatgpt.com/c/${CHAT_IN_PROJECT}`, windowId: 3, index: 0 });
     await h.api.placeSuccessorChat(offer(), 7);

@@ -181,9 +181,10 @@ import { readDurable, writeDurableNow, writeDurableSoon } from './durable.js';
 import { APP_VERSION, BRIDGE_PROTOCOL } from './version.js';
 import { requestCorrelation } from './session/correlation.js';
 import { bindAgentWorkspace } from './workspace.js';
+import { bridgePorts, DEFAULT_BRIDGE_PORTS } from './profile.js';
 
 /** Fixed candidates so the extension can find the app without being told a port. */
-export const DEFAULT_PORTS = [8765, 8766, 8767, 8768, 8769];
+export const DEFAULT_PORTS = [...DEFAULT_BRIDGE_PORTS];
 /**
  * The shipped range is fixed on purpose, but the test suite runs many bridges in parallel
  * forks on a machine where an installed app already holds 8765. A test whose own bind lost
@@ -191,15 +192,7 @@ export const DEFAULT_PORTS = [8765, 8766, 8767, 8768, 8769];
  * test POSTing observations into the user's actual history. `CLF_BRIDGE_PORTS=0` asks the
  * OS for a free port per bridge instead, so no run can collide with another or with the app.
  */
-const PORTS = ((): number[] => {
-  const raw = process.env.CLF_BRIDGE_PORTS;
-  if (!raw) return DEFAULT_PORTS;
-  const parsed = raw
-    .split(',')
-    .map((part) => Number.parseInt(part.trim(), 10))
-    .filter((value) => Number.isInteger(value) && value >= 0 && value <= 65535);
-  return parsed.length > 0 ? parsed : DEFAULT_PORTS;
-})();
+const PORTS = bridgePorts();
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 /** Durable settled-turn orphan safety net. */
 export const STALE_SWARM_MS = 2 * 60_000;

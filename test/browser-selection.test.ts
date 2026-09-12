@@ -61,3 +61,18 @@ it('finds Brave installations on each platform without mixing in Chrome or Edge'
   expect(linux).toContain('/snap/bin/brave');
   expect(linux.every(candidate => !/chrome|chromium|edge/.test(candidate))).toBe(true);
 });
+
+
+it('pins orchestration launches to the configured Chromium profile directory', async () => {
+  const launch = vi.fn(async (_command: string, _args: readonly string[], _cwd: string) => ({ pid: 123 }));
+  const chrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+  await openInPreferredBrowser('https://chatgpt.com/?cos-worker=1', {
+    platform: 'darwin',
+    env: { COS_BROWSER_PROFILE_DIRECTORY: 'Profile 86' },
+    home: '/Users/example',
+    usable: candidate => candidate === chrome,
+    launch
+  });
+  expect(launch).toHaveBeenCalledTimes(1);
+  expect(launch.mock.calls[0]?.[1]).toContain('--profile-directory=Profile 86');
+});

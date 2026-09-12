@@ -3559,13 +3559,13 @@ function successorChatBase(offered, source) {
 
 async function placeSuccessorChat(raw, tabId) {
   const id = commandMarkerId(raw && raw.id);
+  const marker = id ? `clf=${encodeURIComponent(id)}` : null;
+  const model = commandModelSlug(raw && raw.model);
+  const effort = commandReasoningEffort(raw && raw.reasoningEffort);
+  const query = marker ? [marker] : [];
+  if (model) query.push(`model=${encodeURIComponent(model)}`);
+  if (effort) query.push(`reasoning_effort=${encodeURIComponent(effort)}`);
   if (id && raw.background === true) {
-    const marker = `clf=${encodeURIComponent(id)}`;
-    const model = commandModelSlug(raw.model);
-    const effort = commandReasoningEffort(raw.reasoningEffort);
-    const query = [marker];
-    if (model) query.push(`model=${encodeURIComponent(model)}`);
-    if (effort) query.push(`reasoning_effort=${encodeURIComponent(effort)}`);
     const created = await createChatTab(`https://chatgpt.com/?${query.join('&')}#${marker}`, true);
     if (Number.isInteger(created?.id)) {
       await chrome.tabs.update(created.id, { autoDiscardable: false });
@@ -3577,7 +3577,26 @@ async function placeSuccessorChat(raw, tabId) {
   if (!id) return;
   if (typeof tabId !== 'number') {
     const conversationId = cleanConversationId(raw.homeConversationId);
-    if (!conversationId) return;
+    if (!conversationId) {
+      // A worker can be owned by a synthetic external prime such as
+      // `local:chat-on-steroids-subagent:v1`. That is a valid broker owner but deliberately not
+      // a ChatGPT conversation id, so there is no home tab to find. Placement authority has
+      // already been handed to this extension instance; open the worker's fresh root chat here
+      // instead of silently spending the offer and leaving the command unredeemed. Resumes stay
+      // fail-closed: only workers are handed out with active=false.
+      if (raw.active !== false) return;
+      try {
+        const created = await createChatTab(`https://chatgpt.com/?${query.join('&')}#${marker}`, false, false);
+        if (Number.isInteger(created?.id)) {
+          await chrome.tabs.update(created.id, { autoDiscardable: false });
+          discardProtectedTabs[String(created.id)] = true;
+          await persistLive();
+        }
+      } catch {
+        // Opening authority was spent. The command deadline reports an unsuccessful attempt.
+      }
+      return;
+    }
     try {
       const tabs = await chrome.tabs.query({ url: CHATGPT_TAB_URLS });
       tabId = tabs.filter(tab => conversationForTab(tab) === conversationId).sort((a, b) => a.id - b.id)[0]?.id;
@@ -3596,13 +3615,11 @@ async function placeSuccessorChat(raw, tabId) {
   // Both a query and a fragment, matching the app's commandUrl(): ChatGPT rewrites its own URL
   // during boot and which of the two survives has changed between builds.
   const base = successorChatBase(raw.project, raw.homeConversationId);
-  const marker = `clf=${encodeURIComponent(id)}${base !== 'https://chatgpt.com/' ? '&clf_project=1' : ''}`;
-  const model = commandModelSlug(raw && raw.model);
-  const reasoningEffort = commandReasoningEffort(raw && raw.reasoningEffort);
-  const query = [marker];
-  if (model) query.push(`model=${encodeURIComponent(model)}`);
-  if (reasoningEffort) query.push(`reasoning_effort=${encodeURIComponent(reasoningEffort)}`);
-  const create = { url: `${base}?${query.join('&')}#${marker}`, windowId: home.windowId, active: raw.active !== false };
+  const placedMarker = `${marker}${base !== 'https://chatgpt.com/' ? '&clf_project=1' : ''}`;
+  const placedQuery = [placedMarker];
+  if (model) placedQuery.push(`model=${encodeURIComponent(model)}`);
+  if (effort) placedQuery.push(`reasoning_effort=${encodeURIComponent(effort)}`);
+  const create = { url: `${base}?${placedQuery.join('&')}#${placedMarker}`, windowId: home.windowId, active: raw.active !== false };
   // Directly after the chat it continues, so a handoff reads as one piece of work instead of a
   // tab appended to the far end of a long strip.
   if (typeof home.index === 'number') create.index = home.index + 1;

@@ -118,6 +118,13 @@ export function locateBinary(name: BinaryName, hint?: string): string | null {
       locateCache.set(key, sibling);
       return sibling;
     }
+
+    // An explicit selection is authoritative in both directions. Falling through to the
+    // bundled/PATH copy when the user-selected file exists but is not executable makes a bad
+    // setting look healthy and can silently run a different binary than the one shown in the
+    // UI. Fail closed instead; automatic discovery is only for the no-hint case.
+    locateCache.set(key, null);
+    return null;
   }
 
   const bundled = bundledDir();

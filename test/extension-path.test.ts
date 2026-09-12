@@ -16,6 +16,38 @@ afterEach(async () => {
     writable: true,
     value: originalResourcesPath
   });
+  delete process.env.COS_BRIDGE_PORTS;
+});
+
+it('materializes a profile-specific extension that discovers only that profile bridge', async () => {
+  base = await makeTempDir('clf-extension-profile-');
+  const resources = path.join(base, 'resources');
+  const bundled = path.join(resources, 'extension');
+  const userData = path.join(base, 'user-data');
+  await fs.mkdir(bundled, { recursive: true });
+  await fs.writeFile(path.join(bundled, 'manifest.json'), JSON.stringify({
+    version: '2.0.8',
+    host_permissions: ['https://chatgpt.com/*', 'http://127.0.0.1:8765/*']
+  }));
+  await fs.writeFile(path.join(bundled, 'background.js'), 'const PORTS = [8765, 8766, 8767, 8768, 8769];\n');
+  process.env.COS_BRIDGE_PORTS = '8775,8776';
+  Object.defineProperty(process, 'resourcesPath', { configurable: true, writable: true, value: resources });
+  vi.doMock('electron', () => ({
+    app: {
+      isPackaged: true,
+      getPath: (name: string) => (name === 'userData' ? userData : ''),
+      getAppPath: () => path.join(base!, 'not-used')
+    }
+  }));
+
+  const { extensionDir } = await import('../src/main/extension-path.js');
+  const materialized = extensionDir()!;
+  expect(await fs.readFile(path.join(materialized, 'background.js'), 'utf8')).toContain('const PORTS = [8775,8776];');
+  const manifest = JSON.parse(await fs.readFile(path.join(materialized, 'manifest.json'), 'utf8')) as { host_permissions: string[] };
+  expect(manifest.host_permissions).toContain('https://chatgpt.com/*');
+  expect(manifest.host_permissions).toContain('http://127.0.0.1:8775/*');
+  expect(manifest.host_permissions).toContain('http://127.0.0.1:8776/*');
+  expect(manifest.host_permissions).not.toContain('http://127.0.0.1:8765/*');
 });
 
 it('materializes a packaged extension into a stable per-user folder', async () => {

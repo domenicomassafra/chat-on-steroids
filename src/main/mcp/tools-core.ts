@@ -94,6 +94,7 @@ import { lineDelta } from '../diffstat.js';
 import {
   benignExitNote,
   bindBundledRipgrep,
+  reassertBundledRipgrepPath,
   execRecoveryHints,
   nonZeroExitIsBenign,
   normalizePowerShellOperators,
@@ -800,9 +801,19 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
             // id cannot briefly authorize its previous chat before this call publishes the new owner.
             forgetExecOwner(processId);
 
+            const runtimeCommandBody = reassertBundledRipgrepPath(
+              boundCommand,
+              shell.shellType,
+              shell.shellType === 'cmd' ? null : locateRipgrep(),
+              useLoginShell
+            );
+            const runtimeCommand =
+              runtimeCommandBody === boundCommand
+                ? command
+                : deriveExecArgs(shell, runtimeCommandBody, useLoginShell);
             const output = await unifiedExecManager.execCommand({
               batchMarker: batch?.marker,
-              command,
+              command: runtimeCommand,
               shellType: shell.shellType,
               hookCommand: commandDetail,
               processId,
