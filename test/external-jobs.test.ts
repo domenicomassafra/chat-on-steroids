@@ -13,11 +13,21 @@ const stage = {
 const stageSpawn = vi.fn((_request: { workers: Array<{ task: string }> }) => stage);
 const persistCriticalSwarmNow = vi.fn(async () => true);
 const requestWorkerBootstraps = vi.fn();
+let swarmListener: (() => void) | null = null;
+const onSwarmChange = vi.fn((listener: () => void) => {
+  swarmListener = listener;
+  return vi.fn();
+});
+const swarmStateForCaller = vi.fn<() => { enabled: boolean; running: boolean; retainedHistory: boolean; agents: Array<{ runId: string; id: string; state: string; result: string | null }> }>(
+  () => ({ enabled: true, running: true, retainedHistory: false, agents: [] })
+);
 
 vi.mock('../src/main/agents.js', () => ({
   stageSpawn,
   persistCriticalSwarmNow,
-  requestWorkerBootstraps
+  requestWorkerBootstraps,
+  onSwarmChange,
+  swarmStateForCaller
 }));
 vi.mock('../src/main/config.js', () => ({
   getConfig: () => ({ multiAgent: { enabled: true } })
@@ -34,6 +44,7 @@ const {
 let dir = '';
 beforeEach(async () => {
   vi.clearAllMocks();
+  swarmStateForCaller.mockReturnValue({ enabled: true, running: true, retainedHistory: false, agents: [] });
   dir = await makeTempDir('cos-external-job-');
 });
 afterEach(async () => { await removeTempDir(dir); });
@@ -60,7 +71,9 @@ describe('external subagent jobs', () => {
     }));
     const worker = stageSpawn.mock.calls[0]![0].workers[0]!;
     expect(worker.task.split('\n')[0]).toBe('@Chat On Steroids Core');
-    expect(worker.task).toContain(`Read the complete instructions from ${path.join(dir, 'prompt.md')}.`);
+    expect(worker.task).toContain('# Do the requested work');
+    expect(worker.task).toContain('--- BEGIN EXTERNAL JOB ---');
+    expect(worker.task).not.toContain(`Read the complete instructions from ${path.join(dir, 'prompt.md')}.`);
     expect(persistCriticalSwarmNow).toHaveBeenCalledTimes(1);
     expect(stage.commit).toHaveBeenCalledTimes(1);
     expect(stage.rollback).not.toHaveBeenCalled();
@@ -69,11 +82,59 @@ describe('external subagent jobs', () => {
     expect(dispatch).toMatchObject({ status: 'dispatched', runId: 'run-external', workerId: 'worker-1' });
   });
 
+
   it('fails closed into done.json when prompt.md is absent', async () => {
     expect(await dispatchExternalJob(dir)).toBeNull();
     const done = JSON.parse(await fs.readFile(path.join(dir, 'done.json'), 'utf8'));
     expect(done.status).toBe('error');
     expect(done.error).toMatch(/prompt\.md|ENOENT/i);
     expect(stageSpawn).not.toHaveBeenCalled();
+  });
+
+  it('writes done.json when a dispatched worker fails before reporting', async () => {
+    await fs.writeFile(path.join(dir, 'prompt.md'), '# Do the requested work\n');
+    await dispatchExternalJob(dir);
+
+    swarmStateForCaller.mockReturnValue({
+      enabled: true,
+      running: true,
+      retainedHistory: false,
+      agents: [{ runId: 'run-external', id: 'worker-1', state: 'failed', result: 'the chat did not report back' }]
+    });
+    swarmListener?.();
+
+    await vi.waitFor(async () => {
+      const done = JSON.parse(await fs.readFile(path.join(dir, 'done.json'), 'utf8'));
+      expect(done).toMatchObject({ status: 'error', error: 'the chat did not report back' });
+    });
+  });
+
+  it('does not overwrite a completion file when the worker stops', async () => {
+    await fs.writeFile(path.join(dir, 'prompt.md'), '# Do the requested work\n');
+    await dispatchExternalJob(dir);
+    await fs.writeFile(path.join(dir, 'done.json'), JSON.stringify({ status: 'done', finishedAt: 'now' }));
+
+    swarmStateForCaller.mockReturnValue({
+      enabled: true,
+      running: true,
+      retainedHistory: false,
+      agents: [{ runId: 'run-external', id: 'worker-1', state: 'sleeping', result: 'finished' }]
+    });
+    swarmListener?.();
+
+    await vi.waitFor(async () => {
+      const done = JSON.parse(await fs.readFile(path.join(dir, 'done.json'), 'utf8'));
+      expect(done).toEqual({ status: 'done', finishedAt: 'now' });
+    });
+  });
+
+  it('settles concurrent dispatch failures without colliding temporary files', async () => {
+    const [first, second] = await Promise.all([dispatchExternalJob(dir), dispatchExternalJob(dir)]);
+
+    expect(first).toBeNull();
+    expect(second).toBeNull();
+    const done = JSON.parse(await fs.readFile(path.join(dir, 'done.json'), 'utf8'));
+    expect(done).toMatchObject({ status: 'error' });
+    expect(done.error).toMatch(/prompt\.md|ENOENT/i);
   });
 });
