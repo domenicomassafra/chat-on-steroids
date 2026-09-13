@@ -1,12 +1,21 @@
 {
-  "browserFamily": "chrome",
-  "profileDirectory": "Profile 86",
-  "profileDisplayName": "Profile 86",
-  "appExecutable": "/Applications/Chat On Steroids.app/Contents/MacOS/Chat On Steroids",
+  "transport": "oracle-browser",
   "failClosed": true,
-  "evidence": {
-    "resolvedAt": "2026-09-12",
-    "candidateProfile86ChatgptHistoryRows": 1125,
-    "candidateProfile87ChatgptHistoryRows": 2
-  }
+  "targetHost": "mac-studio-dodo",
+  "browserFamily": "chrome",
+  "browserUserDataDir": "~/.chatonsteroids/oracle-subagent/browser-profile",
+  "profileDirectory": "Default",
+  "profileDisplayName": "Chat On Steroids Subagent",
+  "appExecutable": "/Applications/Chat On Steroids.app/Contents/MacOS/Chat On Steroids",
+  "legacyBrowserUserDataDir": "~/Library/Application Support/Google/Chrome",
+  "legacyProfileDirectory": "Profile 173",
+  "oracleExecutable": "~/Code/oracle-cos-subagent/dist/bin/oracle-cli.js",
+  "oracleWorkingDir": "~/Code/oracle-cos-subagent",
+  "oracleSourceCommit": "ffcac19056b90cf610e4b20ece04aee232f82423",
+  "oracleExecutableSha256": "e728723b6b92a7aee58a4376fa30ecb9f8bdd75af3ff353d93b087c7f120d6c3",
+  "oracleHomeDir": "~/.chatonsteroids/oracle-subagent",
+  "oracleAccountId": "cos-subagent",
+  "oracleAccountRole": "subagent",
+  "defaultConnector": "Chat On Steroids Core",
+  "defaultModel": "gpt-5.6-sol"
 }

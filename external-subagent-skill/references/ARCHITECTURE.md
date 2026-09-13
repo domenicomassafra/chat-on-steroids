@@ -1,9 +1,22 @@
 # Architecture
 
-The external agent never drives ChatGPT UI directly. It writes a local job and relaunches the already-installed Chat On Steroids app with `--cos-subagent-job=<jobDir>`. Electron's single-instance handoff delivers that argv to the primary process.
+`Chat On Steroids Subagents` and DStack `oracle` are separate capabilities. DStack `oracle` keeps
+its existing shared MiniPC route. This skill writes a local job and submits it to the local Chat On
+Steroids app on the Mac Studio; it never forwards through
+`ssh -T -- minipc /home/udodo/.local/bin/oracle-mcp-host`.
 
-The primary process admits the task under a synthetic local external-prime identity, crosses the existing immediate swarm persistence barrier, then asks the existing broker/bridge to open a normal Chat On Steroids worker. The companion extension owns browser delivery and conversation binding exactly as it does for workers spawned from a ChatGPT prime.
+The canonical transport invokes the local Oracle-derived browser runtime with a dedicated persistent
+Chrome user-data root under `~/.chatonsteroids/oracle-subagent/browser-profile`, nested profile
+`Default`. The ordinary Chrome `Profile 173` belongs only to the explicitly selected legacy rollback
+path. Browser state is never copied between those identities.
 
-The browser launch is pinned to the configured Chromium profile directory. On this Mac the authorized live ChatGPT profile is `Profile 86`; the skill fails closed instead of silently falling back to another profile.
+For every prompt the Oracle browser adapter focuses an empty composer, types
+only `@`, waits with DOM mutation evidence for exactly one visible exact native connector choice,
+dispatches a trusted click to that DOM-resolved choice, proves that selection changed the composer,
+then appends the task and uses the normal verified Send/answer-harvest pipeline. Missing,
+ambiguous, or unproven connector UI fails closed before Send.
 
-The worker receives only a short bootstrap containing absolute paths. The long prompt stays in `prompt.md`. The result stays in `response.md`; `done.json` is the completion fence. This avoids response scraping, copy buttons, streaming-state inference, and token-heavy prompt duplication.
+The durable job remains under `~/.chatonsteroids/jobs`: `prompt.md` is owner-only, hash-bound input;
+`dispatch.json` proves an admitted Oracle-derived worker launch and records the pinned non-secret
+Oracle source/executable provenance; `response.md` is the harvested answer; and atomically written
+`done.json` is the sole completion fence.
