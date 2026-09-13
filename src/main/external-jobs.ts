@@ -35,7 +35,8 @@ const metaSchema = z.object({
   model: z.string().trim().max(80).nullable().optional(),
   reasoningEffort: z.enum(['pro', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']).nullable().optional(),
   label: z.string().trim().max(60).optional(),
-  browserProfileDirectory: z.string().trim().min(1).max(120).regex(/^[^\/\\-][^\/\\]*$/).optional()
+  browserProfileDirectory: z.string().trim().min(1).max(120).regex(/^[^\/\\-][^\/\\]*$/).optional(),
+  browserUserDataDir: z.string().trim().min(1).max(500).optional()
 }).passthrough();
 
 export interface ExternalJobDispatch {
@@ -182,6 +183,7 @@ async function durableSpawn(jobDir: string, promptPath: string, responsePath: st
     throw error;
   }
   if (meta.browserProfileDirectory) process.env.COS_BROWSER_PROFILE_DIRECTORY = meta.browserProfileDirectory;
+  if (meta.browserUserDataDir) process.env.COS_BROWSER_USER_DATA_DIR = meta.browserUserDataDir;
   requestWorkerBootstraps(staged.created.map(worker => worker.id), staged.runId);
   return staged;
 }

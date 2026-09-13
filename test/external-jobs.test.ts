@@ -59,6 +59,23 @@ describe('external subagent jobs', () => {
     expect(isExternalJobLaunch(['app'])).toBe(false);
   });
 
+  it('propagates browser profile directory and user data dir to the process environment', async () => {
+    const priorProfile = process.env.COS_BROWSER_PROFILE_DIRECTORY;
+    const priorUserData = process.env.COS_BROWSER_USER_DATA_DIR;
+    try {
+      await fs.writeFile(path.join(dir, 'prompt.md'), '# Work\n');
+      await fs.writeFile(path.join(dir, 'meta.json'), JSON.stringify({ browserProfileDirectory: 'Profile 173', browserUserDataDir: '/custom/chrome' }));
+      await dispatchExternalJob(dir);
+      expect(process.env.COS_BROWSER_PROFILE_DIRECTORY).toBe('Profile 173');
+      expect(process.env.COS_BROWSER_USER_DATA_DIR).toBe('/custom/chrome');
+    } finally {
+      if (priorProfile === undefined) delete process.env.COS_BROWSER_PROFILE_DIRECTORY;
+      else process.env.COS_BROWSER_PROFILE_DIRECTORY = priorProfile;
+      if (priorUserData === undefined) delete process.env.COS_BROWSER_USER_DATA_DIR;
+      else process.env.COS_BROWSER_USER_DATA_DIR = priorUserData;
+    }
+  });
+
   it('durably admits one worker and records the broker identity', async () => {
     await fs.writeFile(path.join(dir, 'prompt.md'), '# Do the requested work\n');
     await fs.writeFile(path.join(dir, 'meta.json'), JSON.stringify({ jobId: 'abc', model: 'gpt-5.6', reasoningEffort: 'high' }));

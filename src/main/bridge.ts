@@ -3357,11 +3357,15 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
 
     let receipt: CommandReceipt;
     if (status === 'sent') {
-      if (!conversation && command.spec.type !== 'worker') {
-        // A successful page send without a concrete chat id is ambiguous, not terminal. Keep
-        // the one leased attempt alive so the browser can retry its ACK when identity appears.
-        // A revival needs it for a second reason: the chat id is the proof that what was typed
-        // went into the worker's own conversation and not into some other tab.
+      if (!conversation) {
+        // Send is the irreversible boundary. A fresh worker may start executing before ChatGPT
+        // exposes its new conversation id; failing the worker here races that real execution and
+        // turns its first tool calls into unattributed orphan work. Keep the exact leased command
+        // alive instead. Current worker pages carry agentCommandId in /events, which is the
+        // existing lost-ACK recovery path and can bind this exact worker as soon as page identity
+        // appears. If identity never appears, the command's existing deadline still fails it.
+        // Resumes/revivals likewise remain retryable because their conversation id is required
+        // to prove where the irreversible send landed.
         return json(res, 503, { error: 'conversation_required', retryable: true }, origin);
       }
       if (command.spec.type === 'revive') {
@@ -3459,25 +3463,6 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
           };
         }
       } else {
-        if (!conversation) {
-          const why = 'the chat this app opened for it never said which conversation it was';
-          if (agent) failAgent(agent, why, undefined, {}, command.spec.runId);
-          receipt = {
-            id,
-            client: client || command.owner,
-            conversationId: null,
-            outcome: 'terminal-failure',
-            committed: false,
-            error: why,
-            completedAt: Date.now()
-          };
-          if (!(await finalizeCommand(command, receipt))) {
-            return json(res, 503, { error: 'command_receipt_not_durable', retryable: true }, origin);
-          }
-          logInfo(`bridge: ${specKey(command.spec)} completed with ${receipt.outcome}`);
-          void deliver();
-          return json(res, 200, receiptReply(receipt), origin);
-        }
         if (!swarmRunning(command.spec.runId)) {
           // A command id is precise, but it is not immortal. If the broker run changed while
           // this page was opening, the old command must not bind the same friendly worker id
@@ -4899,7 +4884,10 @@ function offerPlacement(command: Command): boolean {
   const home = commandHomeConversation(command.spec);
   const worker = command.spec.type === 'worker' && browserWakeConnected();
   if (!worker && (!home || home !== placementCollector)) return false;
-  command.placement = { conversationId: home, background: worker && getConfig().ui.backgroundChats === true };
+  command.placement = {
+    conversationId: home,
+    background: worker && Boolean(home && !home.startsWith('local:')) && getConfig().ui.backgroundChats === true
+  };
   if (worker) wakeBrowserWork();
   return true;
 }

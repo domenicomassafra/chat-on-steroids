@@ -4112,25 +4112,34 @@ describe('delivering a bootstrap', () => {
     expect(swarmState().running).toBe(false);
   });
 
-  /**
-   * The failure the new boundary creates, and its safe ending.
-   *
-   * A page can type the bootstrap and still never see a conversation id — ChatGPT accepted
-   * the message but the tab never showed which chat it landed in. Nothing that chat does can
-   * ever reach the run, so the slot is failed outright rather than left waiting on a chat
-   * that can never be found.
-   */
-  it('fails a worker whose page typed the task but never named its chat', async () => {
+  it('keeps an irreversibly-sent worker leased until exact page events recover its chat identity', async () => {
     await pair();
     spawn({ workers: [{ task: 'unnameable' }], caller: { conversationId: PRIME_CHAT } });
-    const command = await redeem();
+    const command = await redeem(undefined, 'worker-page');
 
-    await request('POST', '/commands/ack', { body: { id: command.id, status: 'sent', agent: 'worker-1' } });
+    const pending = await request('POST', '/commands/ack', {
+      body: { id: command.id, status: 'sent', agent: 'worker-1', client: 'worker-page' }
+    });
+    expect(pending.status).toBe(503);
+    expect(pending.body).toMatchObject({ error: 'conversation_required', retryable: true });
+    let worker = swarmState().agents.find((agent) => agent.id === 'worker-1')!;
+    expect(worker.state).toBe('invited');
+    expect(worker.conversationId).toBeNull();
+    expect(pendingCommands().some(entry => entry.id === command.id)).toBe(true);
 
-    const worker = swarmState().agents.find((agent) => agent.id === 'worker-1')!;
-    expect(worker.state).toBe('failed');
-    expect(worker.result).toMatch(/never said which conversation/);
-    expect(pendingCommands()).toEqual([]);
+    const conversationId = 'eeeeeeee-1111-4222-8333-444444444444';
+    const recovered = await request('POST', '/events', {
+      body: {
+        conversationId,
+        agent: 'worker-1',
+        agentCommandId: command.id,
+        events: [{ kind: 'turn_start', time: Date.now(), turnId: 'late-worker-turn' }]
+      }
+    });
+    expect(recovered.status).toBe(200);
+    worker = swarmState().agents.find((agent) => agent.id === 'worker-1')!;
+    expect(worker.state).toBe('active');
+    expect(worker.conversationId).toBe(conversationId);
   });
 
   it('leases each worker marker independently and binds out-of-order receipts to their exact command', async () => {
@@ -4758,6 +4767,33 @@ describe('a worker chat that never opens', () => {
     expect(opened).toEqual([]);
     } finally { const closed = once(socket, 'close'); socket.close(); await closed; }
   });
+
+  it('does not mark background placement for external workers owned by a synthetic prime', async () => {
+    await pair();
+    const config = getConfig();
+    await saveConfig({ ...config, ui: { ...config.ui, backgroundChats: true } });
+    await request('GET', '/status');
+    const socket = new WebSocket(base.replace('http:', 'ws:') + '/wake', { origin: EXTENSION_ORIGIN });
+    await once(socket, 'open');
+    const authenticated = once(socket, 'message'); socket.send(token!); await authenticated;
+    try {
+      spawn({
+        workers: [{ task: 'external worker placement probe' }],
+        caller: { conversationId: 'local:chat-on-steroids-subagent:v1' }
+      });
+      let placement: any;
+      await vi.waitFor(async () => {
+        const result = await request('GET', '/status');
+        placement ||= result.body.placement;
+        expect(placement?.id).toBeTruthy();
+        expect(placement.active).toBe(false);
+        expect(placement.homeConversationId).toBe('local:chat-on-steroids-subagent:v1');
+        expect(placement.background).toBeUndefined();
+      });
+      expect(opened).toEqual([]);
+    } finally { const closed = once(socket, 'close'); socket.close(); await closed; }
+  });
+
   it('fails the worker definitively instead of leaving it invited, and lets the next one through', async () => {
     await pair();
     spawn({ workers: [{ task: 'first audit' }, { task: 'second audit' }], caller: { conversationId: PRIME_CHAT } });
