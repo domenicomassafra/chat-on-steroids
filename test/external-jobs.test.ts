@@ -145,6 +145,61 @@ describe('external subagent jobs', () => {
     });
   });
 
+  it('submits done.json and response.md when a worker for a synthetic external prime completes with a result', async () => {
+    await fs.writeFile(path.join(dir, 'prompt.md'), '# What is 12345 + 54321?\n');
+    await dispatchExternalJob(dir);
+
+    swarmStateForCaller.mockReturnValue({
+      enabled: true,
+      running: true,
+      retainedHistory: false,
+      agents: [{
+        runId: 'run-external',
+        id: 'worker-1',
+        state: 'sleeping',
+        result: '12345 + 54321 = **66666**.\n\nNon ho potuto scrivere `response.md` e `done.json`: Chat On Steroids Core ha fallito due volte con `tunnel_client_not_seen`'
+      }]
+    });
+    swarmListener?.();
+
+    await vi.waitFor(async () => {
+      const done = JSON.parse(await fs.readFile(path.join(dir, 'done.json'), 'utf8'));
+      expect(done.status).toBe('done');
+      expect(done.finishedAt).toBeDefined();
+    });
+
+    const response = await fs.readFile(path.join(dir, 'response.md'), 'utf8');
+    expect(response).toContain('66666');
+    expect(response).not.toContain('tunnel_client_not_seen');
+  });
+
+  it('preserves an existing response.md and writes done.json when worker stops', async () => {
+    await fs.writeFile(path.join(dir, 'prompt.md'), '# What is 12345 + 54321?\n');
+    await dispatchExternalJob(dir);
+    await fs.writeFile(path.join(dir, 'response.md'), 'pre-written response\n');
+
+    swarmStateForCaller.mockReturnValue({
+      enabled: true,
+      running: true,
+      retainedHistory: false,
+      agents: [{
+        runId: 'run-external',
+        id: 'worker-1',
+        state: 'finished',
+        result: 'new result'
+      }]
+    });
+    swarmListener?.();
+
+    await vi.waitFor(async () => {
+      const done = JSON.parse(await fs.readFile(path.join(dir, 'done.json'), 'utf8'));
+      expect(done.status).toBe('done');
+    });
+
+    const response = await fs.readFile(path.join(dir, 'response.md'), 'utf8');
+    expect(response).toBe('pre-written response\n');
+  });
+
   it('settles concurrent dispatch failures without colliding temporary files', async () => {
     const [first, second] = await Promise.all([dispatchExternalJob(dir), dispatchExternalJob(dir)]);
 

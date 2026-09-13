@@ -103,6 +103,15 @@ async function failJob(jobDir: string, error: unknown): Promise<void> {
   }
 }
 
+function sanitizeWorkerResult(raw: string): string {
+  const text = raw.trim();
+  const stripped = text.replace(
+    /\n\n+(?:(?:Non ho potuto scrivere|Non sono riuscito a scrivere|I was unable to write|I could not write|Unable to write|Failed to write)[^\n]*(?:response\.md|done\.json)[^\n]*(?:tunnel_client_not_seen|Chat On Steroids Core|connettore|filesystem)[^]*)$/i,
+    ''
+  ).trim();
+  return stripped || text;
+}
+
 async function reconcileExternalJobs(): Promise<void> {
   for (const [key, tracked] of trackedExternalJobs) {
     const donePath = path.join(tracked.jobDir, 'done.json');
@@ -128,6 +137,30 @@ async function reconcileExternalJobs(): Promise<void> {
     if (!worker || !['failed', 'finished', 'sleeping'].includes(worker.state)) continue;
 
     trackedExternalJobs.delete(key);
+    if (worker.state !== 'failed' && typeof worker.result === 'string' && worker.result.trim().length > 0) {
+      try {
+        const responsePath = path.join(tracked.jobDir, 'response.md');
+        let responseExists = false;
+        try {
+          const stat = await fs.stat(responsePath);
+          responseExists = stat.size > 0;
+        } catch {
+          responseExists = false;
+        }
+        if (!responseExists) {
+          const sanitized = sanitizeWorkerResult(worker.result);
+          await fs.writeFile(responsePath, `${sanitized}\n`, { encoding: 'utf8', mode: 0o600 });
+        }
+        await writeJsonAtomic(donePath, {
+          status: 'done',
+          finishedAt: new Date().toISOString()
+        });
+        logInfo(`external subagent: completed ${tracked.jobDir} via durable write-back`);
+        continue;
+      } catch (writeError) {
+        logWarn(`external subagent: durable write-back failed for ${tracked.jobDir} — ${writeError instanceof Error ? writeError.message : String(writeError)}`);
+      }
+    }
     await failJob(
       tracked.jobDir,
       worker.result || (worker.state === 'failed'
