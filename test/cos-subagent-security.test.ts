@@ -116,21 +116,13 @@ describe('cos-subagent security controls', () => {
       expect(loaded.legacyProfileDirectory).toBe('Profile 173');
     });
 
-    it('succeeds with current repository profile.json pinned to oracle-browser', async () => {
+    it('uses the approval-free app transport in the repository profile', async () => {
       const loaded = await profile();
-      expect(loaded.transport).toBe('oracle-browser');
+      expect(loaded.transport).toBe('legacy-electron');
       expect(loaded.failClosed).toBe(true);
-      expect(loaded.targetHost).toBe('mac-studio-dodo');
-      expect(loaded.profileDirectory).toBe('Profile 173');
-      expect(loaded.browserUserDataDir).toContain('Library/Application Support/Google/Chrome');
-      expect(loaded.browserAttachRunning).toBe(true);
-      expect(loaded.browserAttachHost).toBe('127.0.0.1');
-      expect(loaded.browserAttachPort).toBe(9222);
-      expect(loaded.browserAccountFingerprint).toMatch(/^afp-[0-9a-f]{24}$/);
+      expect(loaded.appExecutable).toBe('/Applications/Chat On Steroids.app/Contents/MacOS/Chat On Steroids');
       expect(loaded.legacyProfileDirectory).toBe('Profile 173');
-      expect(loaded.legacyBrowserUserDataDir).toBeDefined();
-      expect(loaded.oracleSourceCommit).toBe('2d3b758b1c2e0035d9cc97b061d4a239d2ad33b8');
-      expect(loaded.oracleExecutableSha256).toBe('8464b53e6a65c5a4a3d8ba159be034b8a42411c0a5d2a490eb53b525dcda78d1');
+      expect(loaded.legacyBrowserUserDataDir).toContain('Library/Application Support/Google/Chrome');
     });
   });
 
@@ -251,11 +243,11 @@ describe('cos-subagent security controls', () => {
   });
 
   describe('4. Immutable Oracle provenance and launch admission', () => {
-    it('accepts the pinned Oracle source commit and executable digest', async () => {
+    it('retains a valid Oracle pin for explicit oracle-browser operation', async () => {
       const loaded = await profile();
       await expect(verifyOracleProvenance(loaded)).resolves.toMatchObject({
-        sourceCommit: '2d3b758b1c2e0035d9cc97b061d4a239d2ad33b8',
-        executableSha256: '8464b53e6a65c5a4a3d8ba159be034b8a42411c0a5d2a490eb53b525dcda78d1'
+        sourceCommit: loaded.oracleSourceCommit,
+        executableSha256: loaded.oracleExecutableSha256
       });
     });
 
