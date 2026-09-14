@@ -75,6 +75,7 @@ describe('cos-subagent security controls', () => {
         profileDirectory: 'Profile 173',
         browserAccountFingerprint: 'afp-test',
         browserAttachRunning: true,
+        browserPersistAttachApproval: true,
         browserAttachHost: '127.0.0.1',
         browserAttachPort: 9222,
         oracleExecutable: '/bin/oracle',
@@ -124,13 +125,14 @@ describe('cos-subagent security controls', () => {
       expect(loaded.profileDirectory).toBe('Profile 173');
       expect(loaded.browserUserDataDir).toContain('Library/Application Support/Google/Chrome');
       expect(loaded.browserAttachRunning).toBe(true);
+      expect(loaded.browserPersistAttachApproval).toBe(true);
       expect(loaded.browserAttachHost).toBe('127.0.0.1');
       expect(loaded.browserAttachPort).toBe(9222);
       expect(loaded.browserAccountFingerprint).toMatch(/^afp-[0-9a-f]{24}$/);
       expect(loaded.legacyProfileDirectory).toBe('Profile 173');
       expect(loaded.legacyBrowserUserDataDir).toBeDefined();
-      expect(loaded.oracleSourceCommit).toBe('7add3992cb285ad5ee0f5cd6beff3964bdc6fae2');
-      expect(loaded.oracleExecutableSha256).toBe('8464b53e6a65c5a4a3d8ba159be034b8a42411c0a5d2a490eb53b525dcda78d1');
+      expect(loaded.oracleSourceCommit).toBe('82a0ce1e1832f2e6435c25c64f9728eda1bdc874');
+      expect(loaded.oracleExecutableSha256).toBe('1e8d18853a85e7eb44e0f04568bcd1b5c2d9cc1c4a360646f08428af4b5bfff6');
     });
   });
 
@@ -254,8 +256,8 @@ describe('cos-subagent security controls', () => {
     it('accepts the pinned Oracle source commit and executable digest', async () => {
       const loaded = await profile();
       await expect(verifyOracleProvenance(loaded)).resolves.toMatchObject({
-        sourceCommit: '7add3992cb285ad5ee0f5cd6beff3964bdc6fae2',
-        executableSha256: '8464b53e6a65c5a4a3d8ba159be034b8a42411c0a5d2a490eb53b525dcda78d1'
+        sourceCommit: '82a0ce1e1832f2e6435c25c64f9728eda1bdc874',
+        executableSha256: '1e8d18853a85e7eb44e0f04568bcd1b5c2d9cc1c4a360646f08428af4b5bfff6'
       });
     });
 
