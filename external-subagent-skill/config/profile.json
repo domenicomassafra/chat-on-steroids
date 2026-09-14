@@ -15,7 +15,7 @@
   "legacyProfileDirectory": "Profile 173",
   "oracleExecutable": "~/Code/oracle-cos-subagent/dist/bin/oracle-cli.js",
   "oracleWorkingDir": "~/Code/oracle-cos-subagent",
-  "oracleSourceCommit": "7add3992cb285ad5ee0f5cd6beff3964bdc6fae2",
+  "oracleSourceCommit": "2d3b758b1c2e0035d9cc97b061d4a239d2ad33b8",
   "oracleExecutableSha256": "8464b53e6a65c5a4a3d8ba159be034b8a42411c0a5d2a490eb53b525dcda78d1",
   "oracleHomeDir": "~/.chatonsteroids/oracle-subagent",
   "oracleAccountId": "cos-subagent",
