@@ -1,5 +1,5 @@
 {
-  "transport": "oracle-browser",
+  "transport": "legacy-electron",
   "failClosed": true,
   "targetHost": "mac-studio-dodo",
   "browserFamily": "chrome",
