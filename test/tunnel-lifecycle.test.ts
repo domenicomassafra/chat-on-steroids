@@ -129,6 +129,57 @@ describe('OpenAI tunnel process ownership', () => {
     await handle.stop();
   });
 
+  it('does not terminate Core when a proxied MCP command itself returns forbidden', async () => {
+    vi.useFakeTimers();
+    const reports: any[] = [];
+    const handle = await startTunnel({
+      localUrl: 'http://127.0.0.1:1234/secret',
+      settings,
+      apiKey: 'sk-tunnel-test',
+      report: (report) => reports.push(report)
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    const child = fixture.children[0];
+
+    child.stderr.emit('data', Buffer.from(`${JSON.stringify({
+      level: 'WARN',
+      component: 'dispatcher',
+      msg: 'failed to process polled command',
+      error: 'MCP server returned 403 forbidden_origin'
+    })}\n`));
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(reports.some((report) => report.state === 'auth-failed')).toBe(false);
+    expect(fixture.terminate).not.toHaveBeenCalled();
+    expect(fixture.children).toHaveLength(1);
+    await handle.stop();
+  });
+
+  it('terminates a client on an explicit control-plane authorization rejection', async () => {
+    vi.useFakeTimers();
+    const reports: any[] = [];
+    const handle = await startTunnel({
+      localUrl: 'http://127.0.0.1:1234/secret',
+      settings,
+      apiKey: 'sk-tunnel-test',
+      report: (report) => reports.push(report)
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    const child = fixture.children[0];
+
+    child.stderr.emit('data', Buffer.from(`${JSON.stringify({
+      level: 'ERROR',
+      component: 'controlplane',
+      msg: 'control-plane poll failed',
+      error: '403 forbidden'
+    })}\n`));
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(reports.at(-1)?.state).toBe('auth-failed');
+    expect(fixture.terminate).toHaveBeenCalledWith(child.pid);
+    await handle.stop();
+  });
+
   it('claims one restart and waits for the old process tree before launching its replacement', async () => {
     vi.useFakeTimers();
     const reports: any[] = [];

@@ -464,12 +464,13 @@ void app.whenReady().then(async () => {
   // extension to observe the chat, and multi-agent mode needs it to open worker tabs.
   // Either switch being on starts it. ipc.ts applies the same rule on a settings save.
   acceptExternalJobArgv(process.argv);
+  const externalJobLaunch = pendingExternalJobDirs.size > 0;
   if (getConfig().sessions.record || getConfig().multiAgent.enabled) {
     const startingBridge = startBridge();
     // A CLI-submitted job must not publish its worker before the bridge has registered the
     // broker's spawn listener, otherwise the worker exists durably but no browser command is
     // queued until some unrelated bridge restart. Ordinary startup remains non-blocking.
-    if (pendingExternalJobDirs.size > 0) await startingBridge;
+    if (externalJobLaunch) await startingBridge;
     else void startingBridge;
   }
   openExternalJobAdmission();
@@ -483,7 +484,7 @@ void app.whenReady().then(async () => {
     onError: (err) => logError(`session pruning failed: ${err.message}`)
   });
 
-  if (getConfig().ui.autoConnect) void connect();
+  if (getConfig().ui.autoConnect || externalJobLaunch) void connect();
 
   // Never awaited: an unreachable GitHub, a slow download or a broken release must not delay a
   // window that is already on screen. Everything it learns arrives through the ordinary state

@@ -92,7 +92,7 @@ function lineReader(onLine: (line: string) => void): (chunk: Buffer) => void {
   };
 }
 
-const AUTH_FAILURE = /\b(401|403|unauthorized|invalid[_ ]api[_ ]key|invalid_request_error|forbidden)\b/i;
+const AUTH_FAILURE = /(?:\b(?:control[- ]plane|tunnel)\b[^\n]{0,160}\b(?:401|403|unauthorized|invalid[_ ]api[_ ]key|invalid_request_error|forbidden)\b|\b(?:401|403|unauthorized|invalid[_ ]api[_ ]key|invalid_request_error|forbidden)\b[^\n]{0,160}\b(?:control[- ]plane|tunnel)\b)/i;
 
 /**
  * Errors that mean "this PC cannot reach OpenAI right now", as opposed to "the tunnel

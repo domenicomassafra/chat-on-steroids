@@ -173,4 +173,10 @@ describe('Windows login startup', () => {
     expect(isBackgroundLaunch(['app.exe', '--background=false'])).toBe(false);
     expect(source).toContain('if (!isBackgroundLaunch(process.argv) && !isExternalJobLaunch(process.argv)) windowActivation.request();');
   });
+
+  it('connects an explicit external job even when ordinary startup auto-connect is off', () => {
+    const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');
+    expect(source).toContain('const externalJobLaunch = pendingExternalJobDirs.size > 0;');
+    expect(source).toContain('if (getConfig().ui.autoConnect || externalJobLaunch) void connect();');
+  });
 });
