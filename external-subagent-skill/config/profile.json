@@ -1,5 +1,5 @@
 {
-  "transport": "oracle-browser",
+  "transport": "legacy-electron",
   "failClosed": true,
   "targetHost": "mac-studio-dodo",
   "browserFamily": "chrome",
@@ -15,8 +15,8 @@
   "legacyProfileDirectory": "Profile 173",
   "oracleExecutable": "~/Code/oracle-cos-subagent/dist/bin/oracle-cli.js",
   "oracleWorkingDir": "~/Code/oracle-cos-subagent",
-  "oracleSourceCommit": "2d3b758b1c2e0035d9cc97b061d4a239d2ad33b8",
-  "oracleExecutableSha256": "8464b53e6a65c5a4a3d8ba159be034b8a42411c0a5d2a490eb53b525dcda78d1",
+  "oracleSourceCommit": "2cb6895663db65f80a744b772c3322eda8989f7d",
+  "oracleExecutableSha256": "1e8d18853a85e7eb44e0f04568bcd1b5c2d9cc1c4a360646f08428af4b5bfff6",
   "oracleHomeDir": "~/.chatonsteroids/oracle-subagent",
   "oracleAccountId": "cos-subagent",
   "oracleAccountRole": "subagent",
