@@ -9,8 +9,10 @@ import * as cosSubagent from '../external-subagent-skill/bin/cos-subagent.mjs';
 const {
   CHILD_ENV_KEYS,
   accountFingerprint,
+  buildOracleWorkerArgs,
   childEnvironment,
   ensureOracleHome,
+  launch,
   launchWithFailureFence,
   oracleSessionReceipt,
   profile,
@@ -160,21 +162,44 @@ describe('cos-subagent security controls', () => {
       expect(loaded.legacyBrowserUserDataDir).toContain('Library/Application Support/Google/Chrome');
     });
 
-    it('passes the persistent approval flag only from the explicit Oracle worker path', async () => {
-      const launcher = await fs.readFile(
-        path.resolve('external-subagent-skill/bin/cos-subagent.mjs'),
-        'utf8'
-      );
-      const oracleStart = launcher.indexOf('async function runOracleWorker');
-      const oracleEnd = launcher.indexOf('async function wait(', oracleStart);
-      const appStart = launcher.indexOf('async function launch(jobDir');
-      const appEnd = launcher.indexOf('async function launchWithFailureFence', appStart);
-      expect(oracleStart).toBeGreaterThanOrEqual(0);
-      expect(oracleEnd).toBeGreaterThan(oracleStart);
-      expect(appStart).toBeGreaterThanOrEqual(0);
-      expect(appEnd).toBeGreaterThan(appStart);
-      expect(launcher.slice(oracleStart, oracleEnd)).toContain("'--browser-persist-attach-approval'");
-      expect(launcher.slice(appStart, appEnd)).not.toContain('browser-persist-attach-approval');
+    it('passes persistent approval in Oracle argv while the app launch omits Oracle flags', async () => {
+      const oracleArgs = buildOracleWorkerArgs({
+        executable: '/oracle/bin/oracle',
+        model: 'gpt-5.6-sol',
+        accountId: 'cos-subagent',
+        attachHost: '127.0.0.1',
+        attachPort: 9222,
+        connectorName: 'Chat On Steroids Core',
+        sessionSlug: 'cos-worker-test',
+        responsePath: '/tmp/response.md',
+        timeoutSeconds: 120,
+        promptPath: '/tmp/prompt.md',
+        promptSha256: 'a'.repeat(64),
+        reasoningEffort: 'high'
+      });
+      expect(oracleArgs).toContain('--browser-attach-running');
+      expect(oracleArgs).toContain('--browser-persist-attach-approval');
+
+      const appExecutable = path.join(tempDir, 'Chat On Steroids');
+      await fs.writeFile(appExecutable, 'fixture');
+      const spawned = new EventEmitter() as EventEmitter & { unref: ReturnType<typeof vi.fn> };
+      spawned.unref = vi.fn();
+      const spawnImpl = vi.fn((_executable: string, _args: string[], _options?: unknown) => {
+        process.nextTick(() => spawned.emit('spawn'));
+        return spawned;
+      });
+      await launch('/tmp/cos-job', {
+        transport: 'legacy-electron',
+        appExecutable,
+        legacyBrowserUserDataDir: '/chrome/app',
+        legacyProfileDirectory: 'Profile 173'
+      }, spawnImpl);
+      expect(spawnImpl).toHaveBeenCalledTimes(1);
+      const appArgs = spawnImpl.mock.calls[0]?.[1];
+      expect(appArgs).toBeDefined();
+      expect(appArgs).toEqual(['--cos-subagent-job=/tmp/cos-job']);
+      expect(appArgs).not.toContain('--browser-attach-running');
+      expect(appArgs).not.toContain('--browser-persist-attach-approval');
     });
   });
 
