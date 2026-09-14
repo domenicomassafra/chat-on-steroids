@@ -57,7 +57,7 @@ async function profile(configPath = profilePath) {
   }
   const failClosed = value.failClosed !== false;
   if (failClosed && transport === 'oracle-browser') {
-    const required = ['targetHost', 'browserUserDataDir', 'profileDirectory', 'browserAccountFingerprint', 'browserAttachRunning', 'browserAttachHost', 'browserAttachPort', 'oracleExecutable', 'oracleWorkingDir', 'oracleSourceCommit', 'oracleExecutableSha256', 'oracleHomeDir', 'oracleAccountId', 'oracleAccountRole', 'defaultConnector'];
+    const required = ['targetHost', 'browserUserDataDir', 'profileDirectory', 'browserAccountFingerprint', 'browserAttachRunning', 'browserPersistAttachApproval', 'browserAttachHost', 'browserAttachPort', 'oracleExecutable', 'oracleWorkingDir', 'oracleSourceCommit', 'oracleExecutableSha256', 'oracleHomeDir', 'oracleAccountId', 'oracleAccountRole', 'defaultConnector'];
     const missing = required.filter(key => !value[key]);
     if (missing.length) throw new Error(`Oracle-derived subagent profile is incomplete: ${missing.join(', ')}`);
     if (value.targetHost && os.hostname() !== value.targetHost) {
@@ -65,6 +65,9 @@ async function profile(configPath = profilePath) {
     }
     if (value.browserAttachRunning !== true) {
       throw new Error('Oracle-derived subagent profile must use attach-running for the owner-selected Chrome identity');
+    }
+    if (value.browserPersistAttachApproval !== true) {
+      throw new Error('Oracle-derived subagent profile must persist the approved attach-running DevTools connection');
     }
     if (value.browserAttachHost !== '127.0.0.1') {
       throw new Error(`Oracle-derived attach endpoint must be loopback 127.0.0.1; received: ${JSON.stringify(value.browserAttachHost)}`);
@@ -433,6 +436,7 @@ async function runOracleWorker(jobDir) {
     '--account', cfg.oracleAccountId,
     '--no-notify',
     '--browser-attach-running',
+    '--browser-persist-attach-approval',
     '--remote-chrome', `${cfg.browserAttachHost}:${cfg.browserAttachPort}`,
     '--chatgpt-connector', connectorName,
     '--slug', sessionSlug,

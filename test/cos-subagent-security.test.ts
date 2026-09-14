@@ -75,6 +75,7 @@ describe('cos-subagent security controls', () => {
         profileDirectory: 'Profile 173',
         browserAccountFingerprint: 'afp-test',
         browserAttachRunning: true,
+        browserPersistAttachApproval: true,
         browserAttachHost: '127.0.0.1',
         browserAttachPort: 9222,
         oracleExecutable: '/bin/oracle',
@@ -87,6 +88,40 @@ describe('cos-subagent security controls', () => {
         defaultConnector: 'Chat On Steroids Core'
       }));
       await expect(profile(p)).rejects.toThrow(/refusing host/);
+    });
+
+    it('requires persistent approval only for explicit oracle-browser transport', async () => {
+      const p = path.join(tempDir, 'profile-oracle-no-persistent-approval.json');
+      await fs.writeFile(p, JSON.stringify({
+        transport: 'oracle-browser',
+        failClosed: true,
+        targetHost: os.hostname(),
+        browserUserDataDir: '/chrome/data',
+        profileDirectory: 'Profile 173',
+        browserAccountFingerprint: 'afp-test',
+        browserAttachRunning: true,
+        browserAttachHost: '127.0.0.1',
+        browserAttachPort: 9222,
+        oracleExecutable: '/bin/oracle',
+        oracleWorkingDir: '/dir',
+        oracleSourceCommit: '0'.repeat(40),
+        oracleExecutableSha256: '0'.repeat(64),
+        oracleHomeDir: '/home',
+        oracleAccountId: 'cos-subagent',
+        oracleAccountRole: 'subagent',
+        defaultConnector: 'Chat On Steroids Core'
+      }));
+      await expect(profile(p)).rejects.toThrow(/browserPersistAttachApproval/);
+
+      const appProfile = path.join(tempDir, 'profile-app-no-persistent-approval.json');
+      await fs.writeFile(appProfile, JSON.stringify({
+        transport: 'legacy-electron',
+        failClosed: true,
+        appExecutable: '/app/chat',
+        legacyBrowserUserDataDir: '/chrome/app',
+        legacyProfileDirectory: 'Profile 173'
+      }));
+      await expect(profile(appProfile)).resolves.toMatchObject({ transport: 'legacy-electron' });
     });
 
     it('fails closed when legacy rollback profile is incomplete and refuses fallback to oracle fields', async () => {
@@ -123,6 +158,23 @@ describe('cos-subagent security controls', () => {
       expect(loaded.appExecutable).toBe('/Applications/Chat On Steroids.app/Contents/MacOS/Chat On Steroids');
       expect(loaded.legacyProfileDirectory).toBe('Profile 173');
       expect(loaded.legacyBrowserUserDataDir).toContain('Library/Application Support/Google/Chrome');
+    });
+
+    it('passes the persistent approval flag only from the explicit Oracle worker path', async () => {
+      const launcher = await fs.readFile(
+        path.resolve('external-subagent-skill/bin/cos-subagent.mjs'),
+        'utf8'
+      );
+      const oracleStart = launcher.indexOf('async function runOracleWorker');
+      const oracleEnd = launcher.indexOf('async function wait(', oracleStart);
+      const appStart = launcher.indexOf('async function launch(jobDir');
+      const appEnd = launcher.indexOf('async function launchWithFailureFence', appStart);
+      expect(oracleStart).toBeGreaterThanOrEqual(0);
+      expect(oracleEnd).toBeGreaterThan(oracleStart);
+      expect(appStart).toBeGreaterThanOrEqual(0);
+      expect(appEnd).toBeGreaterThan(appStart);
+      expect(launcher.slice(oracleStart, oracleEnd)).toContain("'--browser-persist-attach-approval'");
+      expect(launcher.slice(appStart, appEnd)).not.toContain('browser-persist-attach-approval');
     });
   });
 
