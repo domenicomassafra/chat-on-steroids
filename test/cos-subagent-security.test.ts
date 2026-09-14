@@ -131,7 +131,7 @@ describe('cos-subagent security controls', () => {
       expect(loaded.browserAccountFingerprint).toMatch(/^afp-[0-9a-f]{24}$/);
       expect(loaded.legacyProfileDirectory).toBe('Profile 173');
       expect(loaded.legacyBrowserUserDataDir).toBeDefined();
-      expect(loaded.oracleSourceCommit).toBe('82a0ce1e1832f2e6435c25c64f9728eda1bdc874');
+      expect(loaded.oracleSourceCommit).toBe('2cb6895663db65f80a744b772c3322eda8989f7d');
       expect(loaded.oracleExecutableSha256).toBe('1e8d18853a85e7eb44e0f04568bcd1b5c2d9cc1c4a360646f08428af4b5bfff6');
     });
   });
@@ -256,7 +256,7 @@ describe('cos-subagent security controls', () => {
     it('accepts the pinned Oracle source commit and executable digest', async () => {
       const loaded = await profile();
       await expect(verifyOracleProvenance(loaded)).resolves.toMatchObject({
-        sourceCommit: '82a0ce1e1832f2e6435c25c64f9728eda1bdc874',
+        sourceCommit: '2cb6895663db65f80a744b772c3322eda8989f7d',
         executableSha256: '1e8d18853a85e7eb44e0f04568bcd1b5c2d9cc1c4a360646f08428af4b5bfff6'
       });
     });
