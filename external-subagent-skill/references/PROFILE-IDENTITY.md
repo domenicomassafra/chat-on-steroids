@@ -1,10 +1,15 @@
-# Authorized Chrome profile
+# Browser identity boundary
 
-The live Chrome data contained two local profile directories that were ambiguous by display label alone: `Profile 86` and `Profile 87`.
+The canonical Oracle-derived transport uses the owner-selected ordinary Chrome user-data root with
+nested Chrome profile `Profile 173`. The authorized ChatGPT account role is `subagent`; the concrete
+account identifier stays host-local and receipts expose only the role plus a redacted profile key.
 
-Targeted ChatGPT-history evidence on 2026-09-12 resolved the authorized active profile:
+Oracle browser mode must attach to the already-running profile through the configured local DevTools
+endpoint. It must fail closed if the endpoint is absent, belongs to another user-data root, or remains
+ambiguous. It must never copy cookies, clone the profile, import session state, launch a concurrent
+Chrome on the same user-data root, route through the shared MiniPC Oracle, or silently fall back to
+`legacy-electron`. The explicit rollback transport may use the same owner-selected identity, but it is
+never selected automatically.
 
-- `Profile 86`: 1125 ChatGPT URL rows, with recent ChatGPT activity.
-- `Profile 87`: 2 ChatGPT URL rows, much older activity.
-
-Therefore this skill pins `Profile 86`. The app forwards the pin as Chromium `--profile-directory=Profile 86`; it does not depend on whichever Chrome window happened to have focus last and fails closed rather than silently selecting another profile.
+The logical route key `cos-subagent` and the connector names (`Chat On Steroids Core`,
+`Desktop`, and `Plugins`) are roles/surfaces, not additional ChatGPT accounts.
