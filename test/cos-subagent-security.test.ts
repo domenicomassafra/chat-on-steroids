@@ -30,6 +30,18 @@ afterEach(async () => {
 });
 
 describe('cos-subagent security controls', () => {
+  it('keeps the canonical live smoke non-recursive and caller-persisted', async () => {
+    const smoke = await fs.readFile(
+      path.resolve('external-subagent-skill/live-smoke-prompt.md'),
+      'utf8'
+    );
+    expect(smoke).toContain('You are already the worker reached through that transport.');
+    expect(smoke).toContain('Do not invoke any tools');
+    expect(smoke).toContain('do not start or join another Chat On Steroids, Oracle, subagent, or worker job');
+    expect(smoke).toContain('Do not create response.md yourself; the caller persists your assistant output');
+    expect(smoke.trim().endsWith('COS_SUBAGENT_SMOKE_OK')).toBe(true);
+  });
+
   describe('1. Transport / profile rollback fail-closed', () => {
     it('fails closed on unknown or missing transport', async () => {
       const p1 = path.join(tempDir, 'profile-missing.json');
