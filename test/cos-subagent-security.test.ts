@@ -8,6 +8,7 @@ import { makeTempDir, removeTempDir } from './helpers.js';
 import * as cosSubagent from '../external-subagent-skill/bin/cos-subagent.mjs';
 const {
   CHILD_ENV_KEYS,
+  accountFingerprint,
   childEnvironment,
   ensureOracleHome,
   launchWithFailureFence,
@@ -58,7 +59,11 @@ describe('cos-subagent security controls', () => {
         failClosed: true,
         targetHost: 'unauthorized-foreign-host',
         browserUserDataDir: '/chrome/data',
-        profileDirectory: 'Default',
+        profileDirectory: 'Profile 173',
+        browserAccountFingerprint: 'afp-test',
+        browserAttachRunning: true,
+        browserAttachHost: '127.0.0.1',
+        browserAttachPort: 9222,
         oracleExecutable: '/bin/oracle',
         oracleWorkingDir: '/dir',
         oracleSourceCommit: '0'.repeat(40),
@@ -103,12 +108,16 @@ describe('cos-subagent security controls', () => {
       expect(loaded.transport).toBe('oracle-browser');
       expect(loaded.failClosed).toBe(true);
       expect(loaded.targetHost).toBe('mac-studio-dodo');
-      expect(loaded.profileDirectory).toBe('Default');
-      expect(loaded.browserUserDataDir).toContain('.chatonsteroids/oracle-subagent/browser-profile');
+      expect(loaded.profileDirectory).toBe('Profile 173');
+      expect(loaded.browserUserDataDir).toContain('Library/Application Support/Google/Chrome');
+      expect(loaded.browserAttachRunning).toBe(true);
+      expect(loaded.browserAttachHost).toBe('127.0.0.1');
+      expect(loaded.browserAttachPort).toBe(9222);
+      expect(loaded.browserAccountFingerprint).toMatch(/^afp-[0-9a-f]{24}$/);
       expect(loaded.legacyProfileDirectory).toBe('Profile 173');
       expect(loaded.legacyBrowserUserDataDir).toBeDefined();
-      expect(loaded.oracleSourceCommit).toBe('ffcac19056b90cf610e4b20ece04aee232f82423');
-      expect(loaded.oracleExecutableSha256).toBe('e728723b6b92a7aee58a4376fa30ecb9f8bdd75af3ff353d93b087c7f120d6c3');
+      expect(loaded.oracleSourceCommit).toBe('0977561db3185dba84b4a368ddf288e7056d3803');
+      expect(loaded.oracleExecutableSha256).toBe('8464b53e6a65c5a4a3d8ba159be034b8a42411c0a5d2a490eb53b525dcda78d1');
     });
   });
 
@@ -147,20 +156,27 @@ describe('cos-subagent security controls', () => {
     });
   });
 
-  describe('3. Dedicated Oracle identity guard', () => {
-    it('refuses the real legacy-root/Profile 173 mismatch against the dedicated Default identity', async () => {
+  describe('3. Owner-selected Oracle identity guard', () => {
+    it('refuses a stale dedicated-profile mapping against the owner-selected Profile 173 identity', async () => {
       const oracleHomeDir = path.join(tempDir, 'oracle-home-mismatch');
-      const browserUserDataDir = path.join(tempDir, 'dedicated-browser-root');
-      const legacyBrowserUserDataDir = path.join(tempDir, 'ordinary-chrome-root');
+      const browserUserDataDir = path.join(tempDir, 'owner-browser-root');
+      const staleDedicatedRoot = path.join(tempDir, 'stale-dedicated-root');
       await fs.mkdir(oracleHomeDir, { recursive: true });
+      await fs.mkdir(path.join(browserUserDataDir, 'Profile 173'), { recursive: true });
+      await fs.writeFile(path.join(browserUserDataDir, 'Local State'), JSON.stringify({
+        profile: {
+          last_used: 'Profile 173',
+          info_cache: { 'Profile 173': { name: 'owner-role' } }
+        }
+      }));
       await fs.writeFile(path.join(oracleHomeDir, 'config.json'), JSON.stringify({
         accountPool: {
           accounts: {
             'cos-subagent': {
               providers: ['chatgpt'],
               profile: 'chat-on-steroids-subagent',
-              chromeProfile: 'Profile 173',
-              profileDir: legacyBrowserUserDataDir,
+              chromeProfile: 'Default',
+              profileDir: staleDedicatedRoot,
               role: 'subagent',
               enabled: true
             }
@@ -171,7 +187,8 @@ describe('cos-subagent security controls', () => {
       await expect(ensureOracleHome({
         oracleHomeDir,
         browserUserDataDir,
-        profileDirectory: 'Default',
+        profileDirectory: 'Profile 173',
+        browserAccountFingerprint: accountFingerprint('owner-role'),
         oracleAccountId: 'cos-subagent',
         oracleAccountRole: 'subagent'
       })).rejects.toThrow(/disagrees with the authorized Chat On Steroids profile/);
@@ -179,15 +196,22 @@ describe('cos-subagent security controls', () => {
 
     it('keeps an existing matching mapping pinned instead of changing its identity', async () => {
       const oracleHomeDir = path.join(tempDir, 'oracle-home-match');
-      const browserUserDataDir = path.join(tempDir, 'dedicated-browser-root-match');
+      const browserUserDataDir = path.join(tempDir, 'owner-browser-root-match');
       await fs.mkdir(oracleHomeDir, { recursive: true });
+      await fs.mkdir(path.join(browserUserDataDir, 'Profile 173'), { recursive: true });
+      await fs.writeFile(path.join(browserUserDataDir, 'Local State'), JSON.stringify({
+        profile: {
+          last_used: 'Profile 173',
+          info_cache: { 'Profile 173': { name: 'owner-role' } }
+        }
+      }));
       await fs.writeFile(path.join(oracleHomeDir, 'config.json'), JSON.stringify({
         accountPool: {
           accounts: {
             'cos-subagent': {
               providers: ['chatgpt'],
               profile: 'chat-on-steroids-subagent',
-              chromeProfile: 'Default',
+              chromeProfile: 'Profile 173',
               profileDir: browserUserDataDir,
               role: 'subagent',
               enabled: true
@@ -199,7 +223,8 @@ describe('cos-subagent security controls', () => {
       await expect(ensureOracleHome({
         oracleHomeDir,
         browserUserDataDir,
-        profileDirectory: 'Default',
+        profileDirectory: 'Profile 173',
+        browserAccountFingerprint: accountFingerprint('owner-role'),
         oracleAccountId: 'cos-subagent',
         oracleAccountRole: 'subagent'
       })).resolves.toMatchObject({
@@ -207,7 +232,7 @@ describe('cos-subagent security controls', () => {
         profileRoot: path.resolve(browserUserDataDir)
       });
       const written = JSON.parse(await fs.readFile(path.join(oracleHomeDir, 'config.json'), 'utf8'));
-      expect(written.accountPool.accounts['cos-subagent'].chromeProfile).toBe('Default');
+      expect(written.accountPool.accounts['cos-subagent'].chromeProfile).toBe('Profile 173');
       expect(written.accountPool.accounts['cos-subagent'].profileDir).toBe(path.resolve(browserUserDataDir));
     });
   });
@@ -216,8 +241,8 @@ describe('cos-subagent security controls', () => {
     it('accepts the pinned Oracle source commit and executable digest', async () => {
       const loaded = await profile();
       await expect(verifyOracleProvenance(loaded)).resolves.toMatchObject({
-        sourceCommit: 'ffcac19056b90cf610e4b20ece04aee232f82423',
-        executableSha256: 'e728723b6b92a7aee58a4376fa30ecb9f8bdd75af3ff353d93b087c7f120d6c3'
+        sourceCommit: '0977561db3185dba84b4a368ddf288e7056d3803',
+        executableSha256: '8464b53e6a65c5a4a3d8ba159be034b8a42411c0a5d2a490eb53b525dcda78d1'
       });
     });
 
@@ -262,7 +287,7 @@ describe('cos-subagent security controls', () => {
           provider: 'chatgpt',
           adapter: 'chatgpt-browser',
           accountRole: 'subagent',
-          chromeProfile: 'Default',
+          chromeProfile: 'Profile 173',
           connectorName: 'Chat On Steroids Core'
         })
       ).rejects.toThrow();
@@ -287,7 +312,7 @@ describe('cos-subagent security controls', () => {
           provider: 'chatgpt',
           adapter: 'chatgpt-browser',
           accountRole: 'subagent',
-          chromeProfile: 'Default',
+          chromeProfile: 'Profile 173',
           connectorName: 'Chat On Steroids Core'
         })
       ).rejects.toThrow(/Oracle session identity receipt is incomplete/);
@@ -301,7 +326,7 @@ describe('cos-subagent security controls', () => {
         id: 'session-config-only',
         browser: {
           config: {
-            chromeProfile: 'Default',
+            chromeProfile: 'Profile 173',
             connectorName: 'Chat On Steroids Core',
             providerReceipt: {
               provider: 'chatgpt',
@@ -323,7 +348,7 @@ describe('cos-subagent security controls', () => {
           provider: 'chatgpt',
           adapter: 'chatgpt-browser',
           accountRole: 'subagent',
-          chromeProfile: 'Default',
+          chromeProfile: 'Profile 173',
           connectorName: 'Chat On Steroids Core'
         })
       ).rejects.toThrow(/Oracle session identity receipt is incomplete/);
@@ -337,7 +362,7 @@ describe('cos-subagent security controls', () => {
         id: 'session-mismatch',
         browser: {
           config: {
-            chromeProfile: 'Default',
+            chromeProfile: 'Profile 173',
             connectorName: 'Chat On Steroids Core',
             providerReceipt: {
               provider: 'chatgpt',
@@ -367,7 +392,7 @@ describe('cos-subagent security controls', () => {
           provider: 'chatgpt',
           adapter: 'chatgpt-browser',
           accountRole: 'subagent',
-          chromeProfile: 'Default',
+          chromeProfile: 'Profile 173',
           connectorName: 'Chat On Steroids Core'
         })
       ).rejects.toThrow(/connector evidence/);
@@ -381,7 +406,7 @@ describe('cos-subagent security controls', () => {
         id: 'session-valid',
         browser: {
           config: {
-            chromeProfile: 'Default',
+            chromeProfile: 'Profile 173',
             connectorName: 'Chat On Steroids Core',
             providerReceipt: {
               provider: 'chatgpt',
@@ -410,8 +435,11 @@ describe('cos-subagent security controls', () => {
         provider: 'chatgpt',
         adapter: 'chatgpt-browser',
         accountRole: 'subagent',
-        chromeProfile: 'Default',
+        accountFingerprint: 'afp-redacted-test',
+        chromeProfile: 'Profile 173',
         connectorName: 'Chat On Steroids Core'
+      }, {
+        accountFingerprint: 'afp-redacted-test'
       });
 
       expect(receipt.transport).toBe('oracle-browser');
@@ -421,15 +449,17 @@ describe('cos-subagent security controls', () => {
         provider: 'chatgpt',
         adapter: 'chatgpt-browser',
         accountRole: 'subagent',
-        chromeProfile: 'Default',
+        accountFingerprint: 'afp-redacted-test',
+        chromeProfile: 'Profile 173',
         connectorName: 'Chat On Steroids Core'
       });
       expect(receipt.observed).toEqual({
         provider: 'chatgpt',
         adapter: 'chatgpt-browser',
         accountRole: 'subagent',
+        accountFingerprint: 'afp-redacted-test',
         profileKey: 'sha256-profile-redacted-key',
-        chromeProfile: 'Default',
+        chromeProfile: 'Profile 173',
         connectorName: 'Chat On Steroids Core',
         connectorSelection: {
           requestedName: 'Chat On Steroids Core',

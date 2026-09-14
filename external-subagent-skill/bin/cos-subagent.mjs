@@ -57,11 +57,20 @@ async function profile(configPath = profilePath) {
   }
   const failClosed = value.failClosed !== false;
   if (failClosed && transport === 'oracle-browser') {
-    const required = ['targetHost', 'browserUserDataDir', 'profileDirectory', 'oracleExecutable', 'oracleWorkingDir', 'oracleSourceCommit', 'oracleExecutableSha256', 'oracleHomeDir', 'oracleAccountId', 'oracleAccountRole', 'defaultConnector'];
+    const required = ['targetHost', 'browserUserDataDir', 'profileDirectory', 'browserAccountFingerprint', 'browserAttachRunning', 'browserAttachHost', 'browserAttachPort', 'oracleExecutable', 'oracleWorkingDir', 'oracleSourceCommit', 'oracleExecutableSha256', 'oracleHomeDir', 'oracleAccountId', 'oracleAccountRole', 'defaultConnector'];
     const missing = required.filter(key => !value[key]);
     if (missing.length) throw new Error(`Oracle-derived subagent profile is incomplete: ${missing.join(', ')}`);
     if (value.targetHost && os.hostname() !== value.targetHost) {
       throw new Error(`Chat On Steroids subagents is pinned to ${value.targetHost}; refusing host ${os.hostname()}`);
+    }
+    if (value.browserAttachRunning !== true) {
+      throw new Error('Oracle-derived subagent profile must use attach-running for the owner-selected Chrome identity');
+    }
+    if (value.browserAttachHost !== '127.0.0.1') {
+      throw new Error(`Oracle-derived attach endpoint must be loopback 127.0.0.1; received: ${JSON.stringify(value.browserAttachHost)}`);
+    }
+    if (!Number.isInteger(value.browserAttachPort) || value.browserAttachPort <= 0 || value.browserAttachPort > 65535) {
+      throw new Error(`Oracle-derived attach port is invalid: ${JSON.stringify(value.browserAttachPort)}`);
     }
   }
   if (failClosed && transport === 'legacy-electron') {
@@ -87,6 +96,11 @@ function childEnvironment(extra = {}) {
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
+}
+function accountFingerprint(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) throw new Error('Owner-selected Chrome account metadata is empty');
+  return `afp-${sha256(normalized).slice(0, 24)}`;
 }
 function pinnedHex(value, bytes, label) {
   const normalized = String(value || '').trim().toLowerCase();
@@ -116,7 +130,21 @@ async function ensureOracleHome(cfg) {
   const profileRoot = configuredPath(cfg.browserUserDataDir);
   const nestedProfile = path.join(profileRoot, cfg.profileDirectory);
   await fs.mkdir(oracleHome, { recursive: true, mode: 0o700 });
-  await fs.mkdir(nestedProfile, { recursive: true, mode: 0o700 });
+  const profileRootStat = await fs.stat(profileRoot).catch(() => null);
+  const nestedProfileStat = await fs.stat(nestedProfile).catch(() => null);
+  if (!profileRootStat?.isDirectory() || !nestedProfileStat?.isDirectory()) {
+    throw new Error('Authorized Chat On Steroids Chrome profile root/profile is missing; refusing to create or copy owner browser state');
+  }
+  const localState = await readJson(path.join(profileRoot, 'Local State')).catch(() => null);
+  const lastUsed = typeof localState?.profile?.last_used === 'string' ? localState.profile.last_used : null;
+  if (lastUsed !== cfg.profileDirectory) {
+    throw new Error(`Authorized Chrome profile is not active: expected ${cfg.profileDirectory}, observed ${lastUsed || 'unknown'}`);
+  }
+  const identityLabel = localState?.profile?.info_cache?.[cfg.profileDirectory]?.name;
+  const observedAccountFingerprint = accountFingerprint(identityLabel);
+  if (observedAccountFingerprint !== cfg.browserAccountFingerprint) {
+    throw new Error(`Authorized Chrome account fingerprint mismatch: expected ${cfg.browserAccountFingerprint}, observed ${observedAccountFingerprint}`);
+  }
   const configPath = path.join(oracleHome, 'config.json');
   const current = await readJson(configPath).catch(() => ({}));
   const accountId = cfg.oracleAccountId;
@@ -135,7 +163,7 @@ async function ensureOracleHome(cfg) {
         (existingAccount.providers.length !== 1 || existingAccount.providers[0] !== 'chatgpt')) ||
       existingAccount.enabled === false;
     if (identityMismatch) {
-      throw new Error('Dedicated Oracle account config disagrees with the authorized Chat On Steroids profile');
+      throw new Error('Oracle account config disagrees with the authorized Chat On Steroids profile');
     }
   }
   const account = {
@@ -161,7 +189,7 @@ async function ensureOracleHome(cfg) {
     }
   };
   await atomicJson(configPath, next);
-  return { oracleHome, profileRoot };
+  return { oracleHome, profileRoot, accountFingerprint: observedAccountFingerprint };
 }
 async function verifyOracleProvenance(cfg) {
   const executable = configuredPath(cfg.oracleExecutable);
@@ -241,7 +269,7 @@ async function launchWithFailureFence(jobDir, cfg, launchImpl = launch) {
     throw error;
   }
 }
-async function oracleSessionReceipt(oracleHome, sessionSlug, expected) {
+async function oracleSessionReceipt(oracleHome, sessionSlug, expected, hostIdentity = {}) {
   const sessionDir = path.join(oracleHome, 'sessions', sessionSlug);
   const session = await readJson(path.join(sessionDir, 'meta.json'));
   const receipt = session?.browser?.config?.providerReceipt;
@@ -251,6 +279,7 @@ async function oracleSessionReceipt(oracleHome, sessionSlug, expected) {
     provider: receipt?.provider,
     adapter: receipt?.adapter,
     accountRole: receipt?.accountRole,
+    accountFingerprint: hostIdentity.accountFingerprint,
     profileKey: receipt?.profileKey,
     chromeProfile: session?.browser?.config?.chromeProfile,
     connectorName: connectorSelection?.observedName,
@@ -259,6 +288,7 @@ async function oracleSessionReceipt(oracleHome, sessionSlug, expected) {
     chromeTargetId: runtime?.frozenConversationTargetId
   };
   const required = ['provider', 'adapter', 'accountRole', 'profileKey', 'chromeProfile', 'connectorName', 'conversationId', 'chromeTargetId'];
+  if (expected.accountFingerprint) required.push('accountFingerprint');
   const missing = required.filter(key => !observed[key]);
   if (missing.length) throw new Error(`Oracle session identity receipt is incomplete: ${missing.join(', ')}`);
   if (
@@ -293,7 +323,7 @@ async function runOracleWorker(jobDir) {
   }
   const provenance = await verifyOracleProvenance(cfg);
   const { executable, workingDir } = provenance;
-  const { oracleHome } = await ensureOracleHome(cfg);
+  const { oracleHome, accountFingerprint: observedAccountFingerprint } = await ensureOracleHome(cfg);
   const meta = await readJson(path.join(jobDir, 'meta.json'));
   const promptPath = path.join(jobDir, 'prompt.md');
   const promptHandle = await fs.open(promptPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
@@ -320,6 +350,8 @@ async function runOracleWorker(jobDir) {
     '--engine', 'browser',
     '--model', model,
     '--account', cfg.oracleAccountId,
+    '--browser-attach-running',
+    '--remote-chrome', `${cfg.browserAttachHost}:${cfg.browserAttachPort}`,
     '--chatgpt-connector', connectorName,
     '--slug', sessionSlug,
     '--write-output', responsePath,
@@ -360,11 +392,14 @@ async function runOracleWorker(jobDir) {
     provider: 'chatgpt',
     adapter: 'chatgpt-browser',
     accountRole: cfg.oracleAccountRole,
+    accountFingerprint: observedAccountFingerprint,
     chromeProfile: cfg.profileDirectory,
     connectorName
   };
   if (cfg.oracleProfileKey) expectedReceipt.profileKey = cfg.oracleProfileKey;
-  const receipt = await oracleSessionReceipt(oracleHome, sessionSlug, expectedReceipt);
+  const receipt = await oracleSessionReceipt(oracleHome, sessionSlug, expectedReceipt, {
+    accountFingerprint: observedAccountFingerprint
+  });
   await atomicJson(path.join(jobDir, 'done.json'), {
     status: 'done',
     completedAt: new Date().toISOString(),
@@ -559,6 +594,7 @@ export {
   profile,
   configuredPath,
   childEnvironment,
+  accountFingerprint,
   cleanConnector,
   browserThinkingTime,
   oracleSessionReceipt,

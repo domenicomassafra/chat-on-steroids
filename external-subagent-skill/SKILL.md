@@ -8,7 +8,7 @@ metadata:
 # Chat On Steroids Subagents
 
 Use the bundled `bin/cos-subagent.mjs`. The canonical transport is the local Oracle-derived browser
-runtime using the dedicated persistent Chrome root/profile pinned in `config/profile.json`. It is
+runtime attached to the owner-selected already-running Chrome root/profile pinned in `config/profile.json`. It is
 **not** the DStack `oracle` skill and must not route through the shared MiniPC Oracle service.
 
 The default connector is `Chat On Steroids Core`. Override it only when the task requires another
@@ -67,9 +67,10 @@ shell can never hide the job identity.
 
 - The CLI copies the supplied prompt to `<jobDir>/prompt.md`.
 - The CLI submits the job to the local Chat On Steroids worker facade on the Mac Studio.
-- The facade dispatches a fresh Oracle-derived browser worker into the dedicated persistent browser
-  root/profile only after the configured Oracle source commit and executable SHA-256 both match; it
-  never invokes the shared MiniPC Oracle route or silently falls back to ordinary Chrome.
+- The facade dispatches a fresh Oracle-derived browser worker that attaches only to the configured
+  loopback DevTools endpoint and owner-selected Chrome root/profile after the configured Oracle source
+  commit and executable SHA-256 both match; it never invokes the shared MiniPC Oracle route or silently
+  falls back to `legacy-electron`.
 - The browser adapter selects `Chat On Steroids Core` natively, sends the task, and the worker writes
   `response.md`, then atomically writes `done.json`.
 - The calling agent never needs to copy text from the ChatGPT page.

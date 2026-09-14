@@ -5,10 +5,11 @@ its existing shared MiniPC route. This skill writes a local job and submits it t
 Steroids app on the Mac Studio; it never forwards through
 `ssh -T -- minipc /home/udodo/.local/bin/oracle-mcp-host`.
 
-The canonical transport invokes the local Oracle-derived browser runtime with a dedicated persistent
-Chrome user-data root under `~/.chatonsteroids/oracle-subagent/browser-profile`, nested profile
-`Default`. The ordinary Chrome `Profile 173` belongs only to the explicitly selected legacy rollback
-path. Browser state is never copied between those identities.
+The canonical transport invokes the local Oracle-derived browser runtime against the owner-selected
+ordinary Chrome user-data root and nested `Profile 173`. It does not launch a concurrent browser on
+that root: it attaches only through the configured loopback DevTools endpoint, structurally verifies
+the endpoint belongs to the expected user-data root, and uses the redacted `subagent` account mapping
+as the identity receipt. Browser cookies, profile files, and session state are never copied.
 
 For every prompt the Oracle browser adapter focuses an empty composer, types
 only `@`, waits with DOM mutation evidence for exactly one visible exact native connector choice,

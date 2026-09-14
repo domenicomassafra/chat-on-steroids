@@ -1,14 +1,15 @@
 # Browser identity boundary
 
-The canonical Oracle-derived transport uses the dedicated persistent browser root
-`~/.chatonsteroids/oracle-subagent/browser-profile` with nested Chrome profile `Default`. The
-authorized ChatGPT account role is `subagent`. This identity is intentionally isolated from both
-the shared MiniPC Oracle runtime and the owner's ordinary Chrome user-data root.
+The canonical Oracle-derived transport uses the owner-selected ordinary Chrome user-data root with
+nested Chrome profile `Profile 173`. The authorized ChatGPT account role is `subagent`; the concrete
+account identifier stays host-local and receipts expose only the role plus a redacted profile key.
 
-The ordinary Chrome root with `Profile 173` is reserved only for the deliberately selected
-`legacy-electron` rollback transport. Oracle browser mode must never fall back to that profile,
-copy it, or import its cookies/session state. If the dedicated `Default` profile is not signed in,
-that is an owner login gate rather than permission to migrate another profile.
+Oracle browser mode must attach to the already-running profile through the configured local DevTools
+endpoint. It must fail closed if the endpoint is absent, belongs to another user-data root, or remains
+ambiguous. It must never copy cookies, clone the profile, import session state, launch a concurrent
+Chrome on the same user-data root, route through the shared MiniPC Oracle, or silently fall back to
+`legacy-electron`. The explicit rollback transport may use the same owner-selected identity, but it is
+never selected automatically.
 
 The logical route key `cos-subagent` and the connector names (`Chat On Steroids Core`,
 `Desktop`, and `Plugins`) are roles/surfaces, not additional ChatGPT accounts.
