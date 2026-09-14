@@ -230,6 +230,87 @@ async function waitForSpawnAdmission(child) {
     child.once('error', onError);
   });
 }
+async function waitForOracleTerminalOrExit({
+  child,
+  oracleHome,
+  sessionSlug,
+  responsePath,
+  timeoutMs
+}) {
+  const sessionsDir = path.join(oracleHome, 'sessions');
+  const sessionMetaPath = path.join(sessionsDir, sessionSlug, 'meta.json');
+  await fs.mkdir(sessionsDir, { recursive: true, mode: 0o700 });
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    let checking = false;
+    let watcher = null;
+    const cleanup = () => {
+      clearTimeout(timeout);
+      clearInterval(fallback);
+      watcher?.close();
+      child.off('error', onError);
+      child.off('exit', onExit);
+    };
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    };
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onError = (error) => fail(error);
+    const onExit = (code, signal) => finish({ source: 'process', code, signal, session: null });
+    const checkSession = async () => {
+      if (settled || checking) return;
+      checking = true;
+      try {
+        const session = await readJson(sessionMetaPath).catch(() => null);
+        const status = session?.status;
+        if (!['completed', 'partial', 'error', 'cancelled'].includes(status)) return;
+        if (status === 'completed') {
+          const response = await fs.readFile(responsePath, 'utf8').catch(() => '');
+          if (!response.trim()) return;
+        }
+        // Session metadata is the durable Oracle completion record. If the CLI keeps an
+        // accessory handle alive after that record is terminal, stop only this task-owned
+        // child so the CoS file-backed completion fence can advance deterministically.
+        if (child.exitCode == null && child.signalCode == null) child.kill('SIGTERM');
+        finish({
+          source: 'session',
+          code: status === 'completed' ? 0 : 1,
+          signal: status === 'completed' ? null : 'SESSION_TERMINAL',
+          session
+        });
+      } catch (error) {
+        fail(error);
+      } finally {
+        checking = false;
+      }
+    };
+    child.once('error', onError);
+    child.once('exit', onExit);
+    const timeout = setTimeout(
+      () => fail(new Error(`Oracle-derived browser worker did not reach a terminal session within ${Math.ceil(timeoutMs / 1000)}s`)),
+      timeoutMs
+    );
+    const fallback = setInterval(() => { void checkSession(); }, 1000);
+    try {
+      watcher = watchFs(sessionsDir, { persistent: true }, () => { void checkSession(); });
+      watcher.on('error', () => {
+        watcher?.close();
+        watcher = null;
+      });
+    } catch {
+      watcher = null;
+    }
+    void checkSession();
+  });
+}
 async function launch(jobDir, cfg, spawnImpl = spawn) {
   if (cfg.transport === 'oracle-browser') {
     await verifyOracleProvenance(cfg);
@@ -350,6 +431,7 @@ async function runOracleWorker(jobDir) {
     '--engine', 'browser',
     '--model', model,
     '--account', cfg.oracleAccountId,
+    '--no-notify',
     '--browser-attach-running',
     '--remote-chrome', `${cfg.browserAttachHost}:${cfg.browserAttachPort}`,
     '--chatgpt-connector', connectorName,
@@ -376,15 +458,23 @@ async function runOracleWorker(jobDir) {
     oracleExecutableSha256: provenance.executableSha256,
     dispatchedAt: new Date().toISOString()
   });
-  const exit = await new Promise((resolve, reject) => {
-    child.once('error', reject);
-    child.once('exit', (code, signal) => resolve({ code, signal }));
+  const exit = await waitForOracleTerminalOrExit({
+    child,
+    oracleHome,
+    sessionSlug,
+    responsePath,
+    timeoutMs: (Math.max(60, Number(meta.timeoutSeconds) || 3600) * 1000) + 30_000
   }).finally(async () => {
     await stdout.close().catch(() => undefined);
     await stderr.close().catch(() => undefined);
   });
   if (exit.code !== 0) {
-    throw new Error(`Oracle-derived browser worker exited ${exit.code ?? exit.signal ?? 'unknown'}; see oracle.stderr.log`);
+    const sessionError = exit.session?.error?.message || exit.session?.errorMessage;
+    throw new Error(
+      sessionError
+        ? `Oracle-derived browser worker failed: ${sessionError}`
+        : `Oracle-derived browser worker exited ${exit.code ?? exit.signal ?? 'unknown'}; see oracle.stderr.log`
+    );
   }
   const response = await fs.readFile(responsePath, 'utf8').catch(() => '');
   if (!response.trim()) throw new Error('Oracle-derived browser worker completed without a response');
@@ -600,6 +690,7 @@ export {
   oracleSessionReceipt,
   verifyOracleProvenance,
   waitForSpawnAdmission,
+  waitForOracleTerminalOrExit,
   launchWithFailureFence,
   ensureOracleHome,
   runOracleWorker,

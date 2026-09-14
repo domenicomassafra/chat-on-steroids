@@ -2,7 +2,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { promises as fs } from 'node:fs';
 import { EventEmitter } from 'node:events';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeTempDir, removeTempDir } from './helpers.js';
 // @ts-expect-error The production subagent launcher is an ESM .mjs entrypoint without declarations.
 import * as cosSubagent from '../external-subagent-skill/bin/cos-subagent.mjs';
@@ -15,7 +15,8 @@ const {
   oracleSessionReceipt,
   profile,
   verifyOracleProvenance,
-  waitForSpawnAdmission
+  waitForSpawnAdmission,
+  waitForOracleTerminalOrExit
 } = cosSubagent;
 
 let tempDir = '';
@@ -263,6 +264,81 @@ describe('cos-subagent security controls', () => {
       const failure = waitForSpawnAdmission(rejected);
       rejected.emit('error', new Error('synthetic spawn failure'));
       await expect(failure).rejects.toThrow(/synthetic spawn failure/);
+    });
+
+    it('turns durable Oracle session error into a terminal worker result even if the CLI lingers', async () => {
+      const oracleHome = path.join(tempDir, 'oracle-terminal-error');
+      const sessionSlug = 'session-error-linger';
+      const sessionDir = path.join(oracleHome, 'sessions', sessionSlug);
+      const responsePath = path.join(tempDir, 'no-response.md');
+      const child = new EventEmitter() as EventEmitter & {
+        exitCode: number | null;
+        signalCode: string | null;
+        kill: ReturnType<typeof vi.fn>;
+      };
+      child.exitCode = null;
+      child.signalCode = null;
+      child.kill = vi.fn(() => {
+        child.signalCode = 'SIGTERM';
+        return true;
+      });
+      const waiting = waitForOracleTerminalOrExit({
+        child,
+        oracleHome,
+        sessionSlug,
+        responsePath,
+        timeoutMs: 5_000
+      });
+      await fs.mkdir(sessionDir, { recursive: true });
+      await fs.writeFile(path.join(sessionDir, 'meta.json'), JSON.stringify({
+        status: 'error',
+        error: { message: 'synthetic browser admission failure' }
+      }));
+
+      await expect(waiting).resolves.toMatchObject({
+        source: 'session',
+        code: 1,
+        signal: 'SESSION_TERMINAL',
+        session: { status: 'error' }
+      });
+      expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    });
+
+    it('accepts durable completed Oracle session only after nonempty write-output exists', async () => {
+      const oracleHome = path.join(tempDir, 'oracle-terminal-done');
+      const sessionSlug = 'session-done-linger';
+      const sessionDir = path.join(oracleHome, 'sessions', sessionSlug);
+      const responsePath = path.join(tempDir, 'response.md');
+      const child = new EventEmitter() as EventEmitter & {
+        exitCode: number | null;
+        signalCode: string | null;
+        kill: ReturnType<typeof vi.fn>;
+      };
+      child.exitCode = null;
+      child.signalCode = null;
+      child.kill = vi.fn(() => {
+        child.signalCode = 'SIGTERM';
+        return true;
+      });
+      const waiting = waitForOracleTerminalOrExit({
+        child,
+        oracleHome,
+        sessionSlug,
+        responsePath,
+        timeoutMs: 5_000
+      });
+      await fs.mkdir(sessionDir, { recursive: true });
+      await fs.writeFile(path.join(sessionDir, 'meta.json'), JSON.stringify({ status: 'completed' }));
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(child.kill).not.toHaveBeenCalled();
+      await fs.writeFile(responsePath, 'COS sentinel output\n');
+
+      await expect(waiting).resolves.toMatchObject({
+        source: 'session',
+        code: 0,
+        session: { status: 'completed' }
+      });
+      expect(child.kill).toHaveBeenCalledWith('SIGTERM');
     });
 
     it('atomically fences post-job launch failure with done.json status=error', async () => {
