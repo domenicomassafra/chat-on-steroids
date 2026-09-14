@@ -11,5 +11,5 @@
 - [x] Preserve historical live evidence while making the owner-selected `Profile 173` the canonical Oracle-derived identity; canonical acceptance remains governed by the current live gate.
 - [x] Prove an external consumer can use the skill: OMP on `antigravity/gemini-3.8-flash` with medium thinking invoked the canonical skill and received `OMP_COS_SKILL_OK` through the live ChatGPT/Chat On Steroids path.
 - [x] Project the canonical skill into the local agent skill directories for OMP, Pi, Hermes, OpenCode and the shared `.agents` surface without copying the source tree.
-- [x] Pin the canonical Oracle donor to source commit `087d857275c0fc3d4493bac6955aecbbd5f2bd56` and executable SHA-256 `8464b53e6a65c5a4a3d8ba159be034b8a42411c0a5d2a490eb53b525dcda78d1`; fail before spawn on mismatch.
+- [x] Pin the canonical Oracle donor to source commit `260d3a7bae93d8c48b5866e1bfe760b4a0eb05bd` and executable SHA-256 `8464b53e6a65c5a4a3d8ba159be034b8a42411c0a5d2a490eb53b525dcda78d1`; fail before spawn on mismatch.
 - [x] Require DOM-observed connector evidence plus frozen conversation/target binding in the durable receipt, and fence post-job launch admission failures with atomic `done.json.status=error`.
