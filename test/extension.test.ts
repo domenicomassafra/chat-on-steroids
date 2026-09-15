@@ -1779,9 +1779,11 @@ describe('extension command delivery', () => {
     expect(worker.scriptingExecuteScript.mock.calls).toEqual([
       [{ target: { tabId: 41 }, files: ['chatgpt-dom.js'] }],
       [{ target: { tabId: 41 }, world: 'MAIN', files: ['fiber.js'] }],
+      [{ target: { tabId: 41 }, world: 'MAIN', files: ['usage.js'] }],
       [{ target: { tabId: 41 }, files: ['content.js'] }],
       [{ target: { tabId: 42 }, files: ['chatgpt-dom.js'] }],
       [{ target: { tabId: 42 }, world: 'MAIN', files: ['fiber.js'] }],
+      [{ target: { tabId: 42 }, world: 'MAIN', files: ['usage.js'] }],
       [{ target: { tabId: 42 }, files: ['content.js'] }]
     ]);
     expect(worker.scriptingInsertCSS.mock.calls).toEqual([
@@ -1801,7 +1803,8 @@ describe('extension command delivery', () => {
 
     expect(worker.tabsSendMessage).toHaveBeenCalledWith(41, { type: 'clf-recorder-ping' });
     expect(worker.scriptingExecuteScript.mock.calls).toEqual([
-      [{ target: { tabId: 41 }, world: 'MAIN', files: ['fiber.js'] }]
+      [{ target: { tabId: 41 }, world: 'MAIN', files: ['fiber.js'] }],
+      [{ target: { tabId: 41 }, world: 'MAIN', files: ['usage.js'] }]
     ]);
     expect(worker.scriptingInsertCSS).not.toHaveBeenCalled();
   });
