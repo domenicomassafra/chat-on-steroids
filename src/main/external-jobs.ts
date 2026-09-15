@@ -86,6 +86,26 @@ async function readMeta(jobDir: string): Promise<z.infer<typeof metaSchema>> {
   }
 }
 
+function assertBrowserLaunchIdentity(meta: z.infer<typeof metaSchema>): void {
+  const requestedProfile = meta.browserProfileDirectory?.trim();
+  const requestedRoot = meta.browserUserDataDir?.trim();
+  if (!requestedProfile && !requestedRoot) return;
+
+  const currentProfile = process.env.COS_BROWSER_PROFILE_DIRECTORY?.trim() || null;
+  const currentRoot = process.env.COS_BROWSER_USER_DATA_DIR?.trim() || null;
+  const profileMatches = !requestedProfile || requestedProfile === currentProfile;
+  const rootMatches = !requestedRoot || (currentRoot !== null && path.resolve(requestedRoot) === path.resolve(currentRoot));
+  if (profileMatches && rootMatches) return;
+
+  // A second Electron launch can hand argv to an app process that was already running, but its
+  // environment does not become the first process's environment. Mutating process.env here used
+  // to make that one external job silently change every later *native* worker browser opening.
+  // Browser identity is an ownership boundary: either this process was born with the requested
+  // identity, or the legacy transport must fail before staging a worker. The Oracle browser
+  // transport owns its profile independently and never reaches this legacy admission path.
+  throw new Error('external subagent browser identity does not match the running Chat On Steroids process; use the Oracle browser transport or launch the app with the requested profile identity');
+}
+
 async function writeJsonAtomic(target: string, value: unknown): Promise<void> {
   const temp = `${target}.tmp-${process.pid}-${randomUUID()}`;
   await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
@@ -215,6 +235,7 @@ function workerTask(promptPath: string, responsePath: string, donePath: string, 
 async function durableSpawn(jobDir: string, promptPath: string, responsePath: string, donePath: string, inlinePrompt: string | null): Promise<SpawnResult> {
   if (!getConfig().multiAgent.enabled) throw new Error('Chat On Steroids multi-agent mode is disabled');
   const meta = await readMeta(jobDir);
+  assertBrowserLaunchIdentity(meta);
   const staged = stageSpawn({
     caller: { conversationId: EXTERNAL_PRIME_CONVERSATION_ID },
     workers: [{
@@ -231,8 +252,6 @@ async function durableSpawn(jobDir: string, promptPath: string, responsePath: st
     staged.rollback();
     throw error;
   }
-  if (meta.browserProfileDirectory) process.env.COS_BROWSER_PROFILE_DIRECTORY = meta.browserProfileDirectory;
-  if (meta.browserUserDataDir) process.env.COS_BROWSER_USER_DATA_DIR = meta.browserUserDataDir;
   requestWorkerBootstraps(staged.created.map(worker => worker.id), staged.runId);
   return staged;
 }

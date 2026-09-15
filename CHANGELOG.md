@@ -9,6 +9,13 @@ The app and the `extension/` companion are versioned together. **Reload the
 extension after updating the app**. If their bridge protocols are incompatible,
 the app refuses the extension and asks you to reload the matching copy.
 
+## [2.0.10] — 2026-09-15
+
+- Native worker delivery no longer spends its bootstrap lease before an authenticated browser companion is available after app/browser restart.
+- Fresh worker bootstrap binds from route/DOM evidence instead of background-tab timer polling, preventing sent workers from expiring before their conversation id is acknowledged.
+- External subagents now use the fail-closed Oracle browser transport by default, with exact persistent attach approval and connector identity receipts.
+- Legacy external jobs can no longer mutate the running app's browser-profile identity; mismatches fail before a native worker is staged.
+
 ## [2.0.9] — they nerfed astra
 
 - Code mode combines local and plugin tools in one JavaScript call, with saved task plans and automatic background command results.

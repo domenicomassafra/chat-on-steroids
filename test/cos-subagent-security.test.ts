@@ -9,8 +9,10 @@ import * as cosSubagent from '../external-subagent-skill/bin/cos-subagent.mjs';
 const {
   CHILD_ENV_KEYS,
   accountFingerprint,
+  buildOracleWorkerArgs,
   childEnvironment,
   ensureOracleHome,
+  launch,
   launchWithFailureFence,
   oracleSessionReceipt,
   profile,
@@ -75,6 +77,7 @@ describe('cos-subagent security controls', () => {
         profileDirectory: 'Profile 173',
         browserAccountFingerprint: 'afp-test',
         browserAttachRunning: true,
+        browserPersistAttachApproval: true,
         browserAttachHost: '127.0.0.1',
         browserAttachPort: 9222,
         oracleExecutable: '/bin/oracle',
@@ -87,6 +90,40 @@ describe('cos-subagent security controls', () => {
         defaultConnector: 'Chat On Steroids Core'
       }));
       await expect(profile(p)).rejects.toThrow(/refusing host/);
+    });
+
+    it('requires persistent approval only for explicit oracle-browser transport', async () => {
+      const p = path.join(tempDir, 'profile-oracle-no-persistent-approval.json');
+      await fs.writeFile(p, JSON.stringify({
+        transport: 'oracle-browser',
+        failClosed: true,
+        targetHost: os.hostname(),
+        browserUserDataDir: '/chrome/data',
+        profileDirectory: 'Profile 173',
+        browserAccountFingerprint: 'afp-test',
+        browserAttachRunning: true,
+        browserAttachHost: '127.0.0.1',
+        browserAttachPort: 9222,
+        oracleExecutable: '/bin/oracle',
+        oracleWorkingDir: '/dir',
+        oracleSourceCommit: '0'.repeat(40),
+        oracleExecutableSha256: '0'.repeat(64),
+        oracleHomeDir: '/home',
+        oracleAccountId: 'cos-subagent',
+        oracleAccountRole: 'subagent',
+        defaultConnector: 'Chat On Steroids Core'
+      }));
+      await expect(profile(p)).rejects.toThrow(/browserPersistAttachApproval/);
+
+      const appProfile = path.join(tempDir, 'profile-app-no-persistent-approval.json');
+      await fs.writeFile(appProfile, JSON.stringify({
+        transport: 'legacy-electron',
+        failClosed: true,
+        appExecutable: '/app/chat',
+        legacyBrowserUserDataDir: '/chrome/app',
+        legacyProfileDirectory: 'Profile 173'
+      }));
+      await expect(profile(appProfile)).resolves.toMatchObject({ transport: 'legacy-electron' });
     });
 
     it('fails closed when legacy rollback profile is incomplete and refuses fallback to oracle fields', async () => {
@@ -116,13 +153,54 @@ describe('cos-subagent security controls', () => {
       expect(loaded.legacyProfileDirectory).toBe('Profile 173');
     });
 
-    it('uses the approval-free app transport in the repository profile', async () => {
+    it('uses the fail-closed Oracle browser transport in the repository profile', async () => {
       const loaded = await profile();
-      expect(loaded.transport).toBe('legacy-electron');
+      expect(loaded.transport).toBe('oracle-browser');
       expect(loaded.failClosed).toBe(true);
-      expect(loaded.appExecutable).toBe('/Applications/Chat On Steroids.app/Contents/MacOS/Chat On Steroids');
-      expect(loaded.legacyProfileDirectory).toBe('Profile 173');
-      expect(loaded.legacyBrowserUserDataDir).toContain('Library/Application Support/Google/Chrome');
+      expect(loaded.browserAttachRunning).toBe(true);
+      expect(loaded.browserPersistAttachApproval).toBe(true);
+      expect(loaded.profileDirectory).toBe('Profile 173');
+      expect(loaded.defaultConnector).toBe('Chat On Steroids Core');
+    });
+
+    it('passes persistent approval in Oracle argv while the app launch omits Oracle flags', async () => {
+      const oracleArgs = buildOracleWorkerArgs({
+        executable: '/oracle/bin/oracle',
+        model: 'gpt-5.6-sol',
+        accountId: 'cos-subagent',
+        attachHost: '127.0.0.1',
+        attachPort: 9222,
+        connectorName: 'Chat On Steroids Core',
+        sessionSlug: 'cos-worker-test',
+        responsePath: '/tmp/response.md',
+        timeoutSeconds: 120,
+        promptPath: '/tmp/prompt.md',
+        promptSha256: 'a'.repeat(64),
+        reasoningEffort: 'high'
+      });
+      expect(oracleArgs).toContain('--browser-attach-running');
+      expect(oracleArgs).toContain('--browser-persist-attach-approval');
+
+      const appExecutable = path.join(tempDir, 'Chat On Steroids');
+      await fs.writeFile(appExecutable, 'fixture');
+      const spawned = new EventEmitter() as EventEmitter & { unref: ReturnType<typeof vi.fn> };
+      spawned.unref = vi.fn();
+      const spawnImpl = vi.fn((_executable: string, _args: string[], _options?: unknown) => {
+        process.nextTick(() => spawned.emit('spawn'));
+        return spawned;
+      });
+      await launch('/tmp/cos-job', {
+        transport: 'legacy-electron',
+        appExecutable,
+        legacyBrowserUserDataDir: '/chrome/app',
+        legacyProfileDirectory: 'Profile 173'
+      }, spawnImpl);
+      expect(spawnImpl).toHaveBeenCalledTimes(1);
+      const appArgs = spawnImpl.mock.calls[0]?.[1];
+      expect(appArgs).toBeDefined();
+      expect(appArgs).toEqual(['--cos-subagent-job=/tmp/cos-job']);
+      expect(appArgs).not.toContain('--browser-attach-running');
+      expect(appArgs).not.toContain('--browser-persist-attach-approval');
     });
   });
 

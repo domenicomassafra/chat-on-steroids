@@ -57,7 +57,7 @@ async function profile(configPath = profilePath) {
   }
   const failClosed = value.failClosed !== false;
   if (failClosed && transport === 'oracle-browser') {
-    const required = ['targetHost', 'browserUserDataDir', 'profileDirectory', 'browserAccountFingerprint', 'browserAttachRunning', 'browserAttachHost', 'browserAttachPort', 'oracleExecutable', 'oracleWorkingDir', 'oracleSourceCommit', 'oracleExecutableSha256', 'oracleHomeDir', 'oracleAccountId', 'oracleAccountRole', 'defaultConnector'];
+    const required = ['targetHost', 'browserUserDataDir', 'profileDirectory', 'browserAccountFingerprint', 'browserAttachRunning', 'browserPersistAttachApproval', 'browserAttachHost', 'browserAttachPort', 'oracleExecutable', 'oracleWorkingDir', 'oracleSourceCommit', 'oracleExecutableSha256', 'oracleHomeDir', 'oracleAccountId', 'oracleAccountRole', 'defaultConnector'];
     const missing = required.filter(key => !value[key]);
     if (missing.length) throw new Error(`Oracle-derived subagent profile is incomplete: ${missing.join(', ')}`);
     if (value.targetHost && os.hostname() !== value.targetHost) {
@@ -65,6 +65,9 @@ async function profile(configPath = profilePath) {
     }
     if (value.browserAttachRunning !== true) {
       throw new Error('Oracle-derived subagent profile must use attach-running for the owner-selected Chrome identity');
+    }
+    if (value.browserPersistAttachApproval !== true) {
+      throw new Error('Oracle-derived subagent profile must persist the approved attach-running DevTools connection');
     }
     if (value.browserAttachHost !== '127.0.0.1') {
       throw new Error(`Oracle-derived attach endpoint must be loopback 127.0.0.1; received: ${JSON.stringify(value.browserAttachHost)}`);
@@ -124,6 +127,40 @@ function browserThinkingTime(value) {
   if (['max', 'ultra', 'heavy'].includes(normalized)) return 'heavy';
   if (normalized === 'pro') return 'pro';
   throw new Error(`Unsupported browser reasoning level: ${value}`);
+}
+function buildOracleWorkerArgs({
+  executable,
+  model,
+  accountId,
+  attachHost,
+  attachPort,
+  connectorName,
+  sessionSlug,
+  responsePath,
+  timeoutSeconds,
+  promptPath,
+  promptSha256,
+  reasoningEffort
+}) {
+  const args = [
+    executable,
+    '--engine', 'browser',
+    '--model', model,
+    '--account', accountId,
+    '--no-notify',
+    '--browser-attach-running',
+    '--browser-persist-attach-approval',
+    '--remote-chrome', `${attachHost}:${attachPort}`,
+    '--chatgpt-connector', connectorName,
+    '--slug', sessionSlug,
+    '--write-output', responsePath,
+    '--browser-timeout', `${Math.max(60, Number(timeoutSeconds) || 3600)}s`,
+    '--prompt-file', promptPath,
+    '--prompt-hash', promptSha256
+  ];
+  const thinking = browserThinkingTime(reasoningEffort);
+  if (thinking) args.splice(args.length - 2, 0, '--browser-thinking-time', thinking);
+  return args;
 }
 async function ensureOracleHome(cfg) {
   const oracleHome = configuredPath(cfg.oracleHomeDir);
@@ -426,24 +463,20 @@ async function runOracleWorker(jobDir) {
   const stderrPath = path.join(jobDir, 'oracle.stderr.log');
   const stdout = await fs.open(stdoutPath, 'w', 0o600);
   const stderr = await fs.open(stderrPath, 'w', 0o600);
-  const oracleArgs = [
+  const oracleArgs = buildOracleWorkerArgs({
     executable,
-    '--engine', 'browser',
-    '--model', model,
-    '--account', cfg.oracleAccountId,
-    '--no-notify',
-    '--browser-attach-running',
-    '--remote-chrome', `${cfg.browserAttachHost}:${cfg.browserAttachPort}`,
-    '--browser-persist-attach-approval',
-    '--chatgpt-connector', connectorName,
-    '--slug', sessionSlug,
-    '--write-output', responsePath,
-    '--browser-timeout', `${Math.max(60, Number(meta.timeoutSeconds) || 3600)}s`,
-    '--prompt-file', promptPath,
-    '--prompt-hash', meta.promptSha256
-  ];
-  const thinking = browserThinkingTime(meta.reasoningEffort);
-  if (thinking) oracleArgs.splice(oracleArgs.length - 2, 0, '--browser-thinking-time', thinking);
+    model,
+    accountId: cfg.oracleAccountId,
+    attachHost: cfg.browserAttachHost,
+    attachPort: cfg.browserAttachPort,
+    connectorName,
+    sessionSlug,
+    responsePath,
+    timeoutSeconds: meta.timeoutSeconds,
+    promptPath,
+    promptSha256: meta.promptSha256,
+    reasoningEffort: meta.reasoningEffort
+  });
   const child = spawn(process.execPath, oracleArgs, {
     cwd: workingDir,
     stdio: ['ignore', stdout.fd, stderr.fd],
@@ -688,6 +721,7 @@ export {
   accountFingerprint,
   cleanConnector,
   browserThinkingTime,
+  buildOracleWorkerArgs,
   oracleSessionReceipt,
   verifyOracleProvenance,
   waitForSpawnAdmission,

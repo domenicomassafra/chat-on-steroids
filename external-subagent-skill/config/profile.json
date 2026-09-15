@@ -1,5 +1,5 @@
 {
-  "transport": "legacy-electron",
+  "transport": "oracle-browser",
   "failClosed": true,
   "targetHost": "mac-studio-dodo",
   "browserFamily": "chrome",
@@ -8,6 +8,7 @@
   "profileDisplayName": "Chat On Steroids Subagent",
   "browserAccountFingerprint": "afp-58ac3689092d34dac05d5440",
   "browserAttachRunning": true,
+  "browserPersistAttachApproval": true,
   "browserAttachHost": "127.0.0.1",
   "browserAttachPort": 9222,
   "appExecutable": "/Applications/Chat On Steroids.app/Contents/MacOS/Chat On Steroids",

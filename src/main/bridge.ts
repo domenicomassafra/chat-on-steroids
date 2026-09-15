@@ -4047,7 +4047,8 @@ async function startBridgeOnce(epoch: number): Promise<number | null> {
         async (candidate) => {
           const stored = await getSecret('bridgeToken');
           return !!stored && stored !== BROWSER_DISCONNECTED && safeEqual(candidate, stored);
-        });
+        },
+        () => { scheduleDeliver(); });
       deliver();
       logInfo(`bridge listening on 127.0.0.1:${actual}`);
       changed();
@@ -6960,6 +6961,25 @@ async function deliverOne(): Promise<void> {
   // that has not been handed to anything must not be spending its ninety seconds here.
   if (browserLaunchPending()) {
     deliverAfterLaunchWindow();
+    return;
+  }
+  if (command.spec.type === 'worker' && !browserWakeConnected() && !browserPresent()) {
+    // The 20-second redeem lease is a page round-trip budget, not a browser/extension startup
+    // budget. After an app restart Chrome can still be running while this process has seen no
+    // authenticated companion request yet. Opening the marked worker URL in that state hands it
+    // to whichever Chrome/profile the OS resolves, starts the lease immediately, and can leave
+    // the command expiring before any content script has a bridge connection at all.
+    //
+    // Keep the worker queued and unleased until the companion proves itself. If the browser is
+    // actually absent, wakeBrowserUrl() may start it with an ordinary unmarked ChatGPT URL; if a
+    // Chrome family process is already running it deliberately does not forward another URL to an
+    // unproven profile. The wake socket's authenticated onConnected callback re-enters deliver().
+    // The worker's existing absolute invitation deadline remains the bounded failure fence.
+    try {
+      await wakeBrowserUrl('https://chatgpt.com/', false, getConfig().ui.backgroundChats === true);
+    } catch (err) {
+      logWarn(`bridge: could not wake the browser companion for ${specKey(command.spec)} — ${err instanceof Error ? err.message : String(err)}`);
+    }
     return;
   }
   const claimedAt = Date.now();
