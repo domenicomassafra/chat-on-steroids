@@ -11756,6 +11756,37 @@ describe('the fresh chat the app opened', () => {
     ]);
   });
 
+  it('binds a fresh worker from route evidence without waiting for a 500 ms polling tick', async () => {
+    const workerChat = '24242424-3535-4646-5757-686868686868';
+    live = await harness(
+      'https://chatgpt.com/?clf=cmd-event-route-worker',
+      {
+        redeem: () => ({ ok: true, command: {
+          id: 'cmd-event-route-worker', type: 'worker', text: 'Worker task', agent: 'worker-1'
+        } }),
+        ack: () => ({ ok: true })
+      },
+      (document, dom) => {
+        document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
+          queueMicrotask(() => {
+            dom.reconfigure({ url: `https://chatgpt.com/c/${workerChat}` });
+            userTurn(document, 'accepted-event-route-worker', 'Worker task', { sent: false });
+          });
+        });
+      }
+    );
+
+    // A fixed 500 ms poll cannot possibly ACK this quickly; observer-driven route evidence can.
+    await settle(250);
+    expect(live.sent.filter(message => message.type === 'ack' && message.status === 'sent')).toContainEqual(
+      expect.objectContaining({
+        id: 'cmd-event-route-worker',
+        agent: 'worker-1',
+        conversationId: workerChat
+      })
+    );
+  });
+
   it('sends a worker bootstrap whose task is shorter than the text it verifies', async () => {
     let submitted = '';
     // The bootstrap is the task, a blank line, and the wrapper explaining how to report.

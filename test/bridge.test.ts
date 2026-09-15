@@ -4255,6 +4255,9 @@ describe('delivering a bootstrap', () => {
 
     // The restored broker still owes run B a tab, so replaying that fact creates a fresh,
     // run-scoped command rather than inheriting the stale marker held by run A's old page.
+    // This assertion is about run identity rather than browser restart recovery, so restore the
+    // authenticated-extension presence that resetBridgeForTests intentionally cleared.
+    expect((await request('GET', '/status')).status).toBe(200);
     expect(requestWorkerBootstraps(['worker-1'])).toBe(1);
     await waitForOpened(1);
     const offeredB = await redeem(undefined, 'run-b-page');
@@ -4736,6 +4739,57 @@ describe('targeted open', () => {
 // ------------------------------------------------------- worker bootstrap failure
 
 describe('a worker chat that never opens', () => {
+  it('does not spend the redeem lease while no authenticated browser companion has appeared', async () => {
+    vi.useFakeTimers();
+    try {
+      token = 'restart-persisted-token';
+      await setSecret('bridgeToken', token);
+
+      spawn({ workers: [{ task: 'wait for the companion after app restart' }], caller: { conversationId: PRIME_CHAT } });
+      await vi.waitFor(() => expect(recoveryBrowserWake).toHaveBeenCalledWith(
+        'https://chatgpt.com/', false, getConfig().ui.backgroundChats === true
+      ));
+      expect(opened).toEqual([]);
+      expect(pendingCommands()).toHaveLength(1);
+
+      // This used to be the terminal boundary: the command was leased before any extension page
+      // had proved it could reach the new bridge process, then failed exactly 20 seconds later.
+      await vi.advanceTimersByTimeAsync(WORKER_REDEEM_MS + 1_000);
+      expect(opened).toEqual([]);
+      expect(pendingCommands()).toHaveLength(1);
+      expect(swarmState().agents.find(agent => agent.id === 'worker-1')?.state).toBe('invited');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('delivers a queued post-restart worker immediately when the wake channel authenticates', async () => {
+    token = 'restart-persisted-token';
+    await setSecret('bridgeToken', token);
+    spawn({ workers: [{ task: 'resume delivery on companion reconnect' }], caller: { conversationId: PRIME_CHAT } });
+    await vi.waitFor(() => expect(recoveryBrowserWake).toHaveBeenCalled());
+    expect(opened).toEqual([]);
+
+    const socket = new WebSocket(base.replace('http:', 'ws:') + '/wake', { origin: EXTENSION_ORIGIN });
+    await once(socket, 'open');
+    const authenticated = once(socket, 'message');
+    socket.send(token);
+    await authenticated;
+    try {
+      let placement: any;
+      await vi.waitFor(async () => {
+        placement ||= (await request('GET', '/status')).body.placement;
+        expect(placement?.id).toBeTruthy();
+      });
+      expect(opened).toEqual([]);
+      expect((await redeem(placement.id)).agent).toBe('worker-1');
+    } finally {
+      const closed = once(socket, 'close');
+      socket.close();
+      await closed;
+    }
+  });
+
   it.each([true, false])('places two workers once through the companion with background window=%s', async (backgroundChats) => {
     await pair();
     const config = getConfig();
@@ -4824,19 +4878,7 @@ describe('a worker chat that never opens', () => {
     expect(next.agent).toBe('worker-2');
   });
 
-  /**
-   * One cold browser start at a time, because a second one is a second browser.
-   *
-   * Handing a URL to a browser that is already running is free. Handing one to a machine with
-   * no browser running is a cold start, and a second open fired into that window does not join
-   * the instance still booting — it becomes an instance of its own, with its own tabs and its
-   * own memory. Delivery advances the moment a command ends, so a browser that never came back
-   * was answered with one cold start per queued command, and every close the user performed was
-   * answered with another. Live on 2026-09-01: eight Chrome process trees, each holding its own
-   * ChatGPT tabs, together pegging the machine.
-   */
-  it('waits for one cold browser start rather than stacking a second', async () => {
-    await pair();
+  it('never spends worker markers on an unproven cold browser while startup is pending', async () => {
     vi.useFakeTimers();
     try {
       const attempts: string[] = [];
@@ -4844,27 +4886,21 @@ describe('a worker chat that never opens', () => {
         attempts.push(url);
         throw new Error('the browser is still starting');
       });
-      // The user closed the browser: nothing has reported for longer than presence lasts, so
-      // every open from here is a cold start rather than a URL handed to a running browser.
-      await vi.advanceTimersByTimeAsync(61_000);
-
       spawn({ workers: [{ task: 'first audit' }, { task: 'second audit' }], caller: { conversationId: PRIME_CHAT } });
       await flushDurable();
       await vi.advanceTimersByTimeAsync(10);
       await flushDurable();
 
-      // worker-1's open failed and ended its command, so delivery advanced to worker-2 in the
-      // same beat. That is the beat this guard exists for: worker-2 waits for the browser
-      // worker-1 asked for instead of asking the operating system for a second one.
-      expect(attempts).toHaveLength(1);
-      expect(pendingCommands().some((command) => command.what === `worker:${currentRunId()}:worker-2`)).toBe(true);
-
-      // Still nothing has reported, so the launch is now one this app has stopped believing in
-      // and worker-2 may have its own.
-      await vi.advanceTimersByTimeAsync(60_001);
-      await flushDurable();
-      await vi.advanceTimersByTimeAsync(10);
-      expect(attempts).toHaveLength(2);
+      expect(recoveryBrowserWake).toHaveBeenCalled();
+      for (const [url] of recoveryBrowserWake.mock.calls) expect(url).toBe('https://chatgpt.com/');
+      // The bridge opener only ever receives marked worker URLs. Until the companion proves it
+      // can redeem them, none are handed to the OS at all; browser-startup.test.ts separately
+      // proves concurrent neutral cold-start requests coalesce into one browser process.
+      expect(attempts).toEqual([]);
+      expect(opened).toEqual([]);
+      await vi.advanceTimersByTimeAsync(WORKER_REDEEM_MS + 1_000);
+      expect(pendingCommands()).toHaveLength(2);
+      expect(swarmState().agents.filter(agent => agent.state === 'invited')).toHaveLength(2);
     } finally {
       vi.useRealTimers();
     }
@@ -7751,8 +7787,22 @@ describe('restarting the bridge', () => {
     const port = await startBridge();
     expect(port).not.toBeNull();
     base = `http://127.0.0.1:${port}`;
-    await waitForOpened(1);
     expect(pendingCommands().map((command) => command.what)).toEqual([`worker:${currentRunId()}:worker-1`]);
+    expect(opened).toEqual([]);
+
+    // Restart replay is now deliberately inert until the new bridge process has a proven
+    // companion. Pair + wake authentication supplies that proof, after which the exact queued
+    // command is handed to this browser via placement rather than an OS-routed marker URL.
+    await pair();
+    const socket = new WebSocket(base.replace('http:', 'ws:') + '/wake', { origin: EXTENSION_ORIGIN });
+    await once(socket, 'open');
+    const authenticated = once(socket, 'message'); socket.send(token!); await authenticated;
+    try {
+      let placement: any;
+      await vi.waitFor(async () => { placement ||= (await request('GET', '/status')).body.placement; expect(placement?.id).toBeTruthy(); });
+      expect((await redeem(placement.id)).agent).toBe('worker-1');
+      expect(opened).toEqual([]);
+    } finally { const closed = once(socket, 'close'); socket.close(); await closed; }
   });
 
   it('does not queue or reopen a sleeping worker through a stale revival callback while stopped', async () => {

@@ -9933,18 +9933,24 @@
 
     // The conversation id only exists once ChatGPT has accepted the message, and it is the
     // whole point of the report: for a worker it is what binds the slot to this chat and
-    // starts it, and for a resume it is what the session is moved onto. Bounded by the same
-    // clock the app is running, so this page never outlives the command it is working on.
-    for (let tries = 0; tries < 80; tries++) {
-      await sleep(500);
-      const found = boot.type === 'resume' ? bootstrapConversation() : CLF_DOM.conversationId();
-      if (found) {
-        if (boot.type === 'resume') rememberResumeGoalPending(found, boot.id);
-        publishBootstrapSelection(found);
-        const acknowledged = await ask({ type: 'ack', id: boot.id, status: 'sent', conversationId: found, agent, client: RUN_ID });
-        await clearAcknowledgedBootstrap(acknowledged);
-        return;
-      }
+    // starts it, and for a resume it is what the session is moved onto.
+    //
+    // Do not discover that route with a chain of sleeps. Background-tab timer clamping can turn
+    // a nominal 500 ms tick into seconds even though the route and user row already changed,
+    // leaving an irreversible Send waiting on JavaScript scheduling before it can ACK. Use the
+    // page-view observer/snapshot signal instead: route/DOM evidence wakes it immediately, while
+    // one bounded wall clock remains the fail-closed limit.
+    const found = await waitPageView(
+      () => boot.type === 'resume' ? bootstrapConversation() : CLF_DOM.conversationId(),
+      () => !attempt?.cancelled && sendingBootstrap(),
+      40_000
+    );
+    if (found) {
+      if (boot.type === 'resume') rememberResumeGoalPending(found, boot.id);
+      publishBootstrapSelection(found);
+      const acknowledged = await ask({ type: 'ack', id: boot.id, status: 'sent', conversationId: found, agent, client: RUN_ID });
+      await clearAcknowledgedBootstrap(acknowledged);
+      return;
     }
     // Sent, but this tab never saw an id, so nothing can be bound to it. Reported honestly:
     // the app ends the slot or the continuation rather than waiting on a chat it cannot name.

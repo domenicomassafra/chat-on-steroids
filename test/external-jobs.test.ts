@@ -59,15 +59,40 @@ describe('external subagent jobs', () => {
     expect(isExternalJobLaunch(['app'])).toBe(false);
   });
 
-  it('propagates browser profile directory and user data dir to the process environment', async () => {
+  it('never mutates process browser identity for an external job', async () => {
     const priorProfile = process.env.COS_BROWSER_PROFILE_DIRECTORY;
     const priorUserData = process.env.COS_BROWSER_USER_DATA_DIR;
     try {
+      process.env.COS_BROWSER_PROFILE_DIRECTORY = 'Profile 173';
+      process.env.COS_BROWSER_USER_DATA_DIR = '/custom/chrome';
       await fs.writeFile(path.join(dir, 'prompt.md'), '# Work\n');
       await fs.writeFile(path.join(dir, 'meta.json'), JSON.stringify({ browserProfileDirectory: 'Profile 173', browserUserDataDir: '/custom/chrome' }));
       await dispatchExternalJob(dir);
       expect(process.env.COS_BROWSER_PROFILE_DIRECTORY).toBe('Profile 173');
       expect(process.env.COS_BROWSER_USER_DATA_DIR).toBe('/custom/chrome');
+    } finally {
+      if (priorProfile === undefined) delete process.env.COS_BROWSER_PROFILE_DIRECTORY;
+      else process.env.COS_BROWSER_PROFILE_DIRECTORY = priorProfile;
+      if (priorUserData === undefined) delete process.env.COS_BROWSER_USER_DATA_DIR;
+      else process.env.COS_BROWSER_USER_DATA_DIR = priorUserData;
+    }
+  });
+
+  it('fails closed before staging when a legacy job asks a running app to change browser identity', async () => {
+    const priorProfile = process.env.COS_BROWSER_PROFILE_DIRECTORY;
+    const priorUserData = process.env.COS_BROWSER_USER_DATA_DIR;
+    try {
+      process.env.COS_BROWSER_PROFILE_DIRECTORY = 'Profile 86';
+      process.env.COS_BROWSER_USER_DATA_DIR = '/owner/chrome';
+      await fs.writeFile(path.join(dir, 'prompt.md'), '# Work\n');
+      await fs.writeFile(path.join(dir, 'meta.json'), JSON.stringify({ browserProfileDirectory: 'Profile 173', browserUserDataDir: '/custom/chrome' }));
+      expect(await dispatchExternalJob(dir)).toBeNull();
+      expect(stageSpawn).not.toHaveBeenCalled();
+      expect(process.env.COS_BROWSER_PROFILE_DIRECTORY).toBe('Profile 86');
+      expect(process.env.COS_BROWSER_USER_DATA_DIR).toBe('/owner/chrome');
+      const done = JSON.parse(await fs.readFile(path.join(dir, 'done.json'), 'utf8'));
+      expect(done).toMatchObject({ status: 'error' });
+      expect(done.error).toMatch(/browser identity does not match/i);
     } finally {
       if (priorProfile === undefined) delete process.env.COS_BROWSER_PROFILE_DIRECTORY;
       else process.env.COS_BROWSER_PROFILE_DIRECTORY = priorProfile;

@@ -9,7 +9,7 @@ export function wakeBrowserWork(): void {
 }
 
 export function attachBrowserWake(server: http.Server, allowed: (request: http.IncomingMessage) => boolean,
-  authenticate: (token: string) => Promise<boolean>): { connected(): boolean; revoke(): void; dispose(): void } {
+  authenticate: (token: string) => Promise<boolean>, onConnected?: () => void): { connected(): boolean; revoke(): void; dispose(): void } {
   const sockets = new WebSocketServer({ noServer: true, maxPayload: 512, perMessageDeflate: false });
   const authorized = new Map<WebSocket, number>();
   let epoch = 0;
@@ -43,6 +43,10 @@ export function attachBrowserWake(server: http.Server, allowed: (request: http.I
           logInfo('bridge: browser wake channel authenticated');
           // Reconnection always reads current work; no lost notification is durable state.
           client.send('wake');
+          // A fresh worker bootstrap is deliberately kept unleased while no companion has proved
+          // it can receive browser work. Re-run delivery as soon as that proof exists instead of
+          // waiting for an unrelated broker mutation or a polling timer.
+          onConnected?.();
         }).catch(() => client.terminate());
       });
     });

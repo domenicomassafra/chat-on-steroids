@@ -153,13 +153,14 @@ describe('cos-subagent security controls', () => {
       expect(loaded.legacyProfileDirectory).toBe('Profile 173');
     });
 
-    it('uses the approval-free app transport in the repository profile', async () => {
+    it('uses the fail-closed Oracle browser transport in the repository profile', async () => {
       const loaded = await profile();
-      expect(loaded.transport).toBe('legacy-electron');
+      expect(loaded.transport).toBe('oracle-browser');
       expect(loaded.failClosed).toBe(true);
-      expect(loaded.appExecutable).toBe('/Applications/Chat On Steroids.app/Contents/MacOS/Chat On Steroids');
-      expect(loaded.legacyProfileDirectory).toBe('Profile 173');
-      expect(loaded.legacyBrowserUserDataDir).toContain('Library/Application Support/Google/Chrome');
+      expect(loaded.browserAttachRunning).toBe(true);
+      expect(loaded.browserPersistAttachApproval).toBe(true);
+      expect(loaded.profileDirectory).toBe('Profile 173');
+      expect(loaded.defaultConnector).toBe('Chat On Steroids Core');
     });
 
     it('passes persistent approval in Oracle argv while the app launch omits Oracle flags', async () => {
