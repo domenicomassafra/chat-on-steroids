@@ -1,4 +1,5 @@
 import path from 'node:path';
+import os from 'node:os';
 import { promises as fs } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -36,7 +37,8 @@ const metaSchema = z.object({
   reasoningEffort: z.enum(['pro', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']).nullable().optional(),
   label: z.string().trim().max(60).optional(),
   browserProfileDirectory: z.string().trim().min(1).max(120).regex(/^[^\/\\-][^\/\\]*$/).optional(),
-  browserUserDataDir: z.string().trim().min(1).max(500).optional()
+  browserUserDataDir: z.string().trim().min(1).max(500).optional(),
+  connectorName: z.string().trim().max(120).optional()
 }).passthrough();
 
 export interface ExternalJobDispatch {
@@ -99,7 +101,7 @@ async function failJob(jobDir: string, error: unknown): Promise<void> {
       finishedAt: new Date().toISOString()
     });
   } catch (writeError) {
-    logWarn(`external subagent: could not write failure state for ${jobDir} — ${writeError instanceof Error ? writeError.message : String(writeError)}`);
+    logWarn(`external subagent: could not write failure state for ${path.basename(jobDir)} — ${writeError instanceof Error ? writeError.message : String(writeError)}`);
   }
 }
 
@@ -121,7 +123,7 @@ async function reconcileExternalJobs(): Promise<void> {
       continue;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        logWarn(`external subagent: could not inspect completion state for ${tracked.jobDir} — ${error instanceof Error ? error.message : String(error)}`);
+        logWarn(`external subagent: could not inspect completion state for ${path.basename(tracked.jobDir)} — ${error instanceof Error ? error.message : String(error)}`);
         continue;
       }
     }
@@ -151,14 +153,28 @@ async function reconcileExternalJobs(): Promise<void> {
           const sanitized = sanitizeWorkerResult(worker.result);
           await fs.writeFile(responsePath, `${sanitized}\n`, { encoding: 'utf8', mode: 0o600 });
         }
+        const meta = await readMeta(tracked.jobDir).catch(() => ({} as z.infer<typeof metaSchema>));
         await writeJsonAtomic(donePath, {
           status: 'done',
-          finishedAt: new Date().toISOString()
+          finishedAt: new Date().toISOString(),
+          receipt: {
+            transport: 'legacy-electron',
+            host: os.hostname(),
+            requested: {
+              connectorName: meta.connectorName || 'Chat On Steroids Core',
+              browserProfileDirectory: meta.browserProfileDirectory || 'Profile 173'
+            },
+            observed: {
+              runId: tracked.runId,
+              workerId: tracked.workerId,
+              conversationId: worker.id
+            }
+          }
         });
-        logInfo(`external subagent: completed ${tracked.jobDir} via durable write-back`);
+        logInfo(`external subagent: completed ${path.basename(tracked.jobDir)} via durable write-back`);
         continue;
       } catch (writeError) {
-        logWarn(`external subagent: durable write-back failed for ${tracked.jobDir} — ${writeError instanceof Error ? writeError.message : String(writeError)}`);
+        logWarn(`external subagent: durable write-back failed for ${path.basename(tracked.jobDir)} — ${writeError instanceof Error ? writeError.message : String(writeError)}`);
       }
     }
     await failJob(
@@ -267,10 +283,10 @@ export async function dispatchExternalJob(rawJobDir: string): Promise<ExternalJo
       runId: spawned.runId,
       workerId: worker.id
     });
-    logInfo(`external subagent: dispatched ${jobDir} as ${spawned.runId}:${worker.id}`);
+    logInfo(`external subagent: dispatched ${path.basename(jobDir)} as ${spawned.runId}:${worker.id}`);
     return { jobDir, promptPath, responsePath, donePath, runId: spawned.runId, workerId: worker.id };
   } catch (error) {
-    logWarn(`external subagent: ${jobDir} failed to dispatch — ${error instanceof Error ? error.message : String(error)}`);
+    logWarn(`external subagent: ${path.basename(jobDir)} failed to dispatch — ${error instanceof Error ? error.message : String(error)}`);
     await failJob(jobDir, error);
     return null;
   }

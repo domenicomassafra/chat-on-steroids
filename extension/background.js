@@ -3586,7 +3586,7 @@ async function placeSuccessorChat(raw, tabId) {
       // fail-closed: only workers are handed out with active=false.
       if (raw.active !== false) return;
       try {
-        const created = await createChatTab(`https://chatgpt.com/?${query.join('&')}#${marker}`, false, false);
+        const created = await createChatTab(`https://chatgpt.com/?${query.join('&')}#${marker}`, false, true);
         if (Number.isInteger(created?.id)) {
           await chrome.tabs.update(created.id, { autoDiscardable: false });
           discardProtectedTabs[String(created.id)] = true;
@@ -3751,6 +3751,7 @@ async function restoreChatgptTab(id) {
       // idempotent because the helper keeps one listener per protocol version.
       try {
         await chrome.scripting.executeScript({ target: { tabId: id }, world: 'MAIN', files: ['fiber.js'] });
+        await chrome.scripting.executeScript({ target: { tabId: id }, world: 'MAIN', files: ['usage.js'] });
       } catch {
         // The tab can navigate between the ping and repair. Static injection covers it.
       }
@@ -3767,6 +3768,7 @@ async function restoreChatgptTab(id) {
     // declaration. An older helper may still answer too; the nonce/version gate in
     // content.js makes those replies harmless, and a future version bump rejects them.
     await chrome.scripting.executeScript({ target: { tabId: id }, world: 'MAIN', files: ['fiber.js'] });
+    await chrome.scripting.executeScript({ target: { tabId: id }, world: 'MAIN', files: ['usage.js'] });
     await chrome.scripting.executeScript({ target: { tabId: id }, files: ['content.js'] });
     await chrome.scripting.insertCSS({ target: { tabId: id }, files: ['overlay.css'] });
     // Successful injection means this exact tab is recovering. Its document registration will

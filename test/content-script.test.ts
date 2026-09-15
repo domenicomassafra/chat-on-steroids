@@ -11756,6 +11756,91 @@ describe('the fresh chat the app opened', () => {
     ]);
   });
 
+  it('binds a fresh worker from route evidence without waiting for a 500 ms polling tick', async () => {
+    const workerChat = '24242424-3535-4646-5757-686868686868';
+    live = await harness(
+      'https://chatgpt.com/?clf=cmd-event-route-worker',
+      {
+        redeem: () => ({ ok: true, command: {
+          id: 'cmd-event-route-worker', type: 'worker', text: 'Worker task', agent: 'worker-1'
+        } }),
+        ack: () => ({ ok: true })
+      },
+      (document, dom) => {
+        document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
+          queueMicrotask(() => {
+            dom.reconfigure({ url: `https://chatgpt.com/c/${workerChat}` });
+            userTurn(document, 'accepted-event-route-worker', 'Worker task', { sent: false });
+          });
+        });
+      }
+    );
+
+    // The old 80 × sleep(500) route poll could not possibly ACK before its first 500 ms tick.
+    // The event-driven wait sees the native route/user-row mutation immediately instead.
+    await settle(250);
+    expect(live.sent.filter(message => message.type === 'ack' && message.status === 'sent')).toContainEqual(
+      expect.objectContaining({
+        id: 'cmd-event-route-worker',
+        agent: 'worker-1',
+        conversationId: workerChat
+      })
+    );
+  });
+
+  it('emits a completed assistant message for an external worker with computed result text', async () => {
+    const workerChat = '34343434-4545-5656-6767-787878787878';
+    const task = 'Calculate 12345 + 54321';
+    let assistantSection: HTMLElement | null = null;
+    live = await harness(
+      'https://chatgpt.com/?clf=cmd-external-worker-complete',
+      {
+        redeem: () => ({ ok: true, command: {
+          id: 'cmd-external-worker-complete', type: 'worker',
+          text: `@Chat On Steroids Core\n${task}`,
+          agent: 'worker-1'
+        } }),
+        ack: () => ({ ok: true })
+      },
+      (document, dom) => {
+        const box = document.querySelector('#prompt-textarea') as HTMLElement;
+        const menu = document.createElement('div'); menu.setAttribute('role', 'listbox');
+        const option = document.createElement('button'); option.setAttribute('role', 'option');
+        option.innerHTML = '<span>Chat On Steroids Core</span><small>Connector</small>';
+        option.addEventListener('click', () => { box.textContent = '@Chat On Steroids Core'; menu.remove(); });
+        menu.append(option); document.body.append(menu);
+        document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
+          dom.reconfigure({ url: `https://chatgpt.com/c/${workerChat}` });
+          userTurn(document, 'accepted-external-worker', `@Chat On Steroids Core\n${task}`, { sent: false });
+          startGenerating(document);
+          assistantSection = assistantTurn(document, 'turn-external-worker', []);
+          prose(document, assistantSection, 'msg-external-worker', '12345 + 54321 = **66666**.');
+        });
+      }
+    );
+    await settle(300);
+    await replyFiber([], [{
+      turnId: 'turn-external-worker',
+      conversationId: workerChat,
+      endMessageId: 'msg-external-worker',
+      messages: [{
+        messageId: 'msg-external-worker',
+        rawMessageId: 'msg-external-worker',
+        stable: true,
+        rawText: '12345 + 54321 = **66666**.'
+      }]
+    }]);
+    stopGenerating(live.document);
+    live.hook.observe();
+    await settle(200);
+    const messages = live.sent
+      .filter(message => message.type === 'events')
+      .flatMap((message: any) => message.entries)
+      .filter((entry: any) => entry.event.kind === 'assistant_message');
+    expect(messages.length).toBeGreaterThan(0);
+    expect(messages.some((entry: any) => entry.event.text && entry.event.text.includes('66666'))).toBe(true);
+  });
+
   it('sends a worker bootstrap whose task is shorter than the text it verifies', async () => {
     let submitted = '';
     // The bootstrap is the task, a blank line, and the wrapper explaining how to report.

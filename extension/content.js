@@ -9544,7 +9544,7 @@
    * immediately when the composer already exists, otherwise wake the instant React mounts
    * one, with only a bounded timer as the failure deadline.
    */
-  function waitForComposer(timeoutMs = 12_000) {
+  function waitForComposer(timeoutMs = 45_000) {
     const current = CLF_DOM.composer();
     if (current && current.isConnected) return Promise.resolve(current);
     return new Promise((resolve) => {
@@ -9763,7 +9763,17 @@
     // resource finished loading, not whether this editing host is usable, and waiting on it
     // is what turned a fresh resume tab into a blank tab for a minute on a throttled page.
     const readyComposer = await waitForComposer();
-    if (!readyComposer) return void (await fail('ChatGPT never exposed a usable composer for bootstrap'));
+    if (!readyComposer) {
+      const diag = [
+        `url=${location.href}`,
+        `title=${document.title}`,
+        `textarea=${Boolean(document.querySelector('textarea'))}`,
+        `promptArea=${Boolean(document.querySelector('#prompt-textarea'))}`,
+        `contenteditable=${Boolean(document.querySelector('[contenteditable]'))}`,
+        `bodyText=${(document.body?.innerText || '').slice(0, 120).replace(/\s+/g, ' ')}`
+      ].join('; ');
+      return void (await fail(`ChatGPT never exposed a usable composer for bootstrap [${diag}]`));
+    }
     if (await failIfRetargeted()) return;
 
     if ((boot.model || boot.reasoningEffort) && !(await CLF_DOM.selectModelSettings(boot.model, boot.reasoningEffort, stillOnTarget))) {
@@ -9933,18 +9943,26 @@
 
     // The conversation id only exists once ChatGPT has accepted the message, and it is the
     // whole point of the report: for a worker it is what binds the slot to this chat and
-    // starts it, and for a resume it is what the session is moved onto. Bounded by the same
-    // clock the app is running, so this page never outlives the command it is working on.
-    for (let tries = 0; tries < 80; tries++) {
-      await sleep(500);
-      const found = boot.type === 'resume' ? bootstrapConversation() : CLF_DOM.conversationId();
-      if (found) {
-        if (boot.type === 'resume') rememberResumeGoalPending(found, boot.id);
-        publishBootstrapSelection(found);
-        const acknowledged = await ask({ type: 'ack', id: boot.id, status: 'sent', conversationId: found, agent, client: RUN_ID });
-        await clearAcknowledgedBootstrap(acknowledged);
-        return;
-      }
+    // starts it, and for a resume it is what the session is moved onto.
+    //
+    // Never wait for that route with a chain of 500 ms sleeps. Chrome clamps background-tab
+    // timers, so the old nominal 40-second loop could take longer than the bridge's 90-second
+    // claimed-command lease. The page had already crossed native Send, yet the broker expired
+    // the worker before this script ever got around to its ACK. The route/user-row transition
+    // is visible through the same MutationObserver + accepted MAIN-world snapshot signal used
+    // by every other page-view wait, so wake on that evidence directly and keep only one wall
+    // clock as the fail-closed bound.
+    const found = await waitPageView(
+      () => boot.type === 'resume' ? bootstrapConversation() : CLF_DOM.conversationId(),
+      () => !attempt?.cancelled && sendingBootstrap(),
+      40_000
+    );
+    if (found) {
+      if (boot.type === 'resume') rememberResumeGoalPending(found, boot.id);
+      publishBootstrapSelection(found);
+      const acknowledged = await ask({ type: 'ack', id: boot.id, status: 'sent', conversationId: found, agent, client: RUN_ID });
+      await clearAcknowledgedBootstrap(acknowledged);
+      return;
     }
     // Sent, but this tab never saw an id, so nothing can be bound to it. Reported honestly:
     // the app ends the slot or the continuation rather than waiting on a chat it cannot name.

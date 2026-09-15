@@ -1056,6 +1056,10 @@ tab that is loading, temporarily unreachable or user-closed does not authorize a
 Extension elections/opening checkpoints survive suspension; deferred command ACK custody also
 survives browser restart. Persist receipt intent before removing the queue entry, and clear it
 only after the app acknowledges it. A lost receipt must not repeat a potentially sent message.
+For a fresh worker bootstrap, native Send may be accepted before ChatGPT exposes the new
+conversation id. That is an ambiguous post-send state, not a failed worker: keep the exact leased
+command alive, and allow later page events carrying its exact `agentCommandId` to bind that
+worker. If no exact identity ever appears, the existing command deadline fails the attempt.
 
 Revival first queries/elects exact existing tabs. Query failure is unknown state, not an empty
 tab list. An existing but not yet usable exact tab blocks replacement. Resume destination

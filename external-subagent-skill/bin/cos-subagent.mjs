@@ -434,6 +434,7 @@ async function runOracleWorker(jobDir) {
     '--no-notify',
     '--browser-attach-running',
     '--remote-chrome', `${cfg.browserAttachHost}:${cfg.browserAttachPort}`,
+    '--browser-persist-attach-approval',
     '--chatgpt-connector', connectorName,
     '--slug', sessionSlug,
     '--write-output', responsePath,
