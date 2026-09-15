@@ -78,6 +78,7 @@ import { browserWindowIconPath } from './window-icon.js';
 import { applyProfilePaths, profileLabel } from './profile.js';
 import { editContextMenuTemplate } from './edit-context-menu.js';
 import { dispatchExternalJob, externalJobDirsFromArgv, isExternalJobLaunch } from './external-jobs.js';
+import { materializeExternalSubagentRuntime } from './external-subagent-runtime.js';
 
 /** Durable state file holding the multi-agent run. Hashes only, never credentials. */
 const SWARM_STATE = 'swarm';
@@ -319,6 +320,9 @@ void app.whenReady().then(async () => {
   if (!shouldBeginAppBootstrap(hasSingleInstanceLock, quitting)) return;
   const userData = app.getPath('userData');
   initLogFile(path.join(userData, 'app.log'));
+  const externalSubagentRuntime = materializeExternalSubagentRuntime();
+  if (externalSubagentRuntime) logInfo(`External subagent runtime: ${externalSubagentRuntime}`);
+  else logWarn('External subagent runtime is unavailable; DStack external subagent facade will fail closed');
   process.on('uncaughtExceptionMonitor', (error, origin) => {
     snapshotLogOnCrash(`${origin}: ${error.stack ?? error.message}`);
   });

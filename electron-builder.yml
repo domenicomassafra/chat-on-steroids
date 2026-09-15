@@ -37,6 +37,10 @@ extraResources:
     filter:
       - '**/*'
       - '!**/*.map'
+  - from: external-subagent-skill
+    to: external-subagent-skill
+    filter:
+      - '**/*'
 
 npmRebuild: false
 
