@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/images/readme-hero.svg?v=2" width="960" alt="Turn ChatGPT into Codex without touching Codex limits. Chat On Steroids: Your files. Your terminal. Your ChatGPT plan." /></p>
+<p align="center"><img src="docs/images/readme-hero.svg?v=2" width="960" alt="Turn ChatGPT into Codex-style local coding. Chat On Steroids: Your files. Your terminal. Your ChatGPT plan." /></p>
 
 <p align="center">
   <a href="https://github.com/totec448-spec/chat-on-steroids/releases/latest/download/Chat-On-Steroids-Setup-x64.exe"><img src="docs/images/download-windows.svg" width="208" height="56" alt="Download for Windows x64" /></a>&nbsp;
@@ -22,9 +22,11 @@
 
 **Give it a team.** Split independent jobs across workers, then bring their results back. Workers keep their context, so the next task can pick up where they left off.
 
+**Bring your own skills.** Import a Markdown skill through **+ → Skills**, then select it from the list or type **/** in the composer. [Skills guide →](docs/skills.md)
+
 **Stay in control of long tasks.** Send a correction while work runs. Goal follows unfinished work; Loop keeps working within your brief. Compact & Resume carries the session and worker history into a fresh chat.
 
-<p align="center"><strong>Uses your ChatGPT conversation. Does not consume Codex quota.</strong><br /><sub>Your account’s model availability, usage and context limits still apply.</sub></p>
+<p align="center"><strong>Uses your ChatGPT conversation rather than invoking Codex directly.</strong><br /><sub>ChatGPT Work and Codex share usage limits. Your account’s model availability, usage and context limits still apply. <a href="https://learn.chatgpt.com/docs/pricing">OpenAI usage details →</a></sub></p>
 
 <br />
 

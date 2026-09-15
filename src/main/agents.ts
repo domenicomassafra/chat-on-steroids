@@ -127,12 +127,12 @@ export class AgentsBusyError extends AgentError {
  * may append the current recovery status; the refusal itself only describes this operation.
  */
 export class IdentityLostError extends AgentError {
-  constructor() {
+  constructor(message?: string) {
     super(
-      'WORKER_IDENTITY_LOST: Chat On Steroids could not tell which conversation this call came from, so it cannot ' +
+      message ?? ('WORKER_IDENTITY_LOST: Chat On Steroids could not tell which conversation this call came from, so it cannot ' +
         'act on the run from here. No agent operation was performed. Wait briefly and retry this operation once. ' +
         'If it is still refused, preserve your result in the chat and report that delivery is unconfirmed; ' +
-        'do not claim the message or finish report reached its recipient.'
+        'do not claim the message or finish report reached its recipient.')
     );
   }
 }
@@ -687,14 +687,11 @@ export function swarmStateForCaller(caller: Caller): SwarmState {
   const dormant = dormantRunForPrime(caller.conversationId);
   if (dormant) return stateForAgents(dormant.agents, false);
 
-  if (runs.size > 0) throw new AgentsBusyError();
-  throw new AgentError(
-    'No sub-agent history belongs to this conversation. Call agents action=spawn to start one.'
-  );
+  return stateForAgents(new Map(), false, false);
 }
 
 export interface CallerSwarmStatus {
-  self: AgentInfo;
+  self: AgentInfo | null;
   state: SwarmState;
   /** Null while this owner's history is parked. */
   runId: string | null;
@@ -728,10 +725,8 @@ export function statusForCaller(caller: Caller): CallerSwarmStatus {
       freeWorkerSlots: getConfig().multiAgent.maxWorkers
     };
   }
-  if (runs.size > 0) throw new AgentsBusyError();
-  throw new AgentError(
-    'No sub-agent run or worker history belongs to this conversation. Call agents action=spawn to start one.'
-  );
+  return { self: null, state: stateForAgents(new Map(), false, false), runId: null,
+    freeWorkerSlots: getConfig().multiAgent.maxWorkers };
 }
 
 /**
@@ -1289,7 +1284,7 @@ export function spawn(input: SpawnInput, options: SpawnOptions = {}): SpawnResul
 
   const conversationId = input.caller.conversationId ?? null;
   if (!conversationId) {
-    throw new AgentError(
+    throw new IdentityLostError(
       'UNIDENTIFIED_CALLER: this app could not prove which ChatGPT conversation this call came from, so it will not ' +
         'make this chat the prime agent of a run. No workers were created. The paired browser extension has to be ' +
         'connected and this conversation has to be showing its connector activity; wait a moment and call ' +
@@ -2284,8 +2279,8 @@ export function failAgent(
     id,
     PRIME_ID,
     note ??
-      `[${id} failed] Its ChatGPT tab never came up: ${agent.info.result}. It will not report. Do that part of the ` +
-        'work yourself or spawn a replacement worker.'
+      `[${id} failed] The worker did not start: ${agent.info.result}. It will not report. Continue that part of the ` +
+        'work yourself. Resolve the reported startup problem before spawning a replacement; repeating the same failed startup opens more tabs without starting the work.'
   );
   const prime = primeAgent(run);
   prime.queue.push(report);

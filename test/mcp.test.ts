@@ -56,6 +56,7 @@ import {
   execOwner,
   MAX_UNREAD_EXEC_RESULTS_PER_CONVERSATION,
   noteExecOwner,
+  forgetExecOwner,
   resetExecOwnershipForTests,
   UNATTENDED_EXEC_NOTICE_MS
 } from '../src/main/codex/ownership.js';
@@ -2703,7 +2704,7 @@ describe('apply_patch', () => {
     expect(content.some((item) => item.type === 'image')).toBe(true);
   });
 
-  it('charges base64 image content to the aggregate read cap and points large images to view_image', async () => {
+  it('uses a separate bounded image budget so ordinary screenshots work through read', async () => {
     const target = path.join(approved, 'large-noise.png');
     await sharp(randomBytes(512 * 512 * 4), { raw: { width: 512, height: 512, channels: 4 } })
       .png({ compressionLevel: 0 })
@@ -2713,8 +2714,7 @@ describe('apply_patch', () => {
       name: 'read',
       arguments: { paths: ['/workspace/large-noise.png'] }
     });
-    expect(readReply.body.result?.isError).toBe(true);
-    expect(textOf(readReply)).toMatch(/aggregate output cap.*view_image/i);
+    expect(readReply.body.result?.isError, textOf(readReply)).not.toBe(true);
 
     const imageReply = await core('tools/call', {
       name: 'view_image',
@@ -2722,6 +2722,24 @@ describe('apply_patch', () => {
     });
     expect(imageReply.body.result?.isError, textOf(imageReply)).not.toBe(true);
     expect((imageReply.body.result?.content as Array<{ type: string }>).some((item) => item.type === 'image')).toBe(true);
+    expect(readReply.body.result?.content.filter((item: any) => item.type === 'image'))
+      .toEqual(imageReply.body.result?.content.filter((item: any) => item.type === 'image'));
+
+    const batch = await core('tools/call', { name: 'read', arguments: {
+      paths: [...Array(5).fill('/workspace/large-noise.png'), '/workspace/pixel.png']
+    } });
+    expect(batch.body.result?.content.filter((item: any) => item.type === 'image')).toHaveLength(4);
+    expect(textOf(batch)).toContain('image output cap');
+
+    await sharp(randomBytes(1500 * 1000 * 4), { raw: { width: 1500, height: 1000, channels: 4 } })
+      .png({ compressionLevel: 0 }).toFile(path.join(approved, 'image-budget.png'));
+    const bytes = await core('tools/call', { name: 'read', arguments: {
+      paths: ['/workspace/image-budget.png', '/workspace/image-budget.png', '/workspace/pixel.png']
+    } });
+    const emitted = bytes.body.result?.content.filter((item: any) => item.type === 'image');
+    expect(emitted).toHaveLength(2); // The refused large second file cannot suppress a later fitting image.
+    expect(emitted.reduce((n: number, item: any) => n + item.data.length, 0)).toBeLessThanOrEqual(12 * 1024 * 1024);
+    expect(textOf(bytes)).toContain('image output cap');
   });
 
   it('accepts a native filesystem path inside apply_patch', async () => {
@@ -3183,6 +3201,18 @@ describe('exec_command and write_stdin', () => {
     expect(brokenText).toContain('Batch: command 2 exited 3; the other command exited 0.');
   }, 60_000);
 
+  it('returns partial search results without exonerating an unreadable batch path', async () => {
+    const result = await core('tools/call', { name: 'exec_command', arguments: {
+      cmds: ['rg -n "export const name" src/app.ts missing-search-file.ts', 'rg -n "export const name" src/app.ts'],
+      workdir: '/workspace', yield_time_ms: 8_000
+    } });
+    expect(result.body.result?.structuredContent).toMatchObject({ exit_code: 2 });
+    expect(textOf(result)).toContain('export const name');
+    expect(textOf(result)).toContain('Batch: command 1 exited 2; the other command exited 0.');
+    expect(textOf(result)).toContain('incomplete');
+    expect(textOf(result)).not.toContain('not a failed search');
+  });
+
   it.skipIf(!IS_WINDOWS)('scopes parser recovery to its failed batch command after an earlier mutation', async () => {
     const reply = await core('tools/call', {
       name: 'exec_command',
@@ -3423,10 +3453,11 @@ describe('exec sessions belong to the chat that opened them', () => {
       yield_time_ms: 250
     });
     expect(stranger.body.result?.isError).toBe(true);
-    expect(textOf(stranger)).toContain(
-      `write_stdin failed: session ${sessionId} is not proven to belong to this durable Chat On Steroids session.`
-    );
+    expect(textOf(stranger)).toContain(`write_stdin failed for session ${sessionId}`);
     expect(textOf(stranger)).not.toContain('echo=stolen');
+    expect(textOf(stranger)).toContain('This refusal concerns this process id, not Read-only mode');
+    expect(textOf(stranger)).toContain('EXEC_SESSION_OWNER_MISMATCH');
+    expect(textOf(stranger)).not.toContain('may already have delivered');
 
     // Caller identity is the authorization boundary. An unattributed call must not inherit
     // the owner's authority merely because it can guess the small numeric session id.
@@ -3436,8 +3467,11 @@ describe('exec sessions belong to the chat that opened them', () => {
       yield_time_ms: 1_000
     });
     expect(unproven.body.result?.isError).toBe(true);
-    expect(textOf(unproven)).toContain('is not proven to belong to this durable Chat On Steroids session');
+    expect(textOf(unproven)).toContain('current call has no proven chat identity');
     expect(textOf(unproven)).not.toContain('echo=anon');
+    expect(textOf(unproven)).toContain('This refusal concerns this process id, not Read-only mode');
+    expect(textOf(unproven)).toContain('EXEC_CALLER_UNIDENTIFIED');
+    expect(textOf(unproven)).toContain('retry this same session_id once');
 
     // The replacement session contract exposes recordings only; the removed status action no
     // longer gives either owner or stranger a side channel into the process manager. Terminal
@@ -3454,6 +3488,34 @@ describe('exec sessions belong to the chat that opened them', () => {
     expect(owner.body.result?.isError).not.toBe(true);
     expect(textOf(owner)).toContain('echo=bye');
     expect(textOf(owner)).toContain('Process exited with code 0');
+  });
+
+  it('distinguishes anonymous launch custody from an unavailable terminal and reports identity recovery', async () => {
+    const source = await createSession({ conversationId: 'exec-return-owner' });
+    expect(prove('wfr_exec_return_owner', 'exec-return-owner', source.id)).toBe('stored');
+    noteExecOwner(987001, source.id);
+    noteExecOwner(987002, null);
+    try {
+      const unknown = await asChat('wfr_exec_return_late', 'write_stdin', { session_id: 987001, chars: '' });
+      expect(textOf(unknown)).toContain('EXEC_CALLER_UNIDENTIFIED');
+      expect(prove('wfr_exec_return_late', 'exec-return-owner', source.id)).toBe('stored');
+      const recovered = await asChat('wfr_exec_return_owner', 'read', { paths: ['/workspace/src/app.ts'] });
+      expect(textOf(recovered)).toContain('Earlier write_stdin calls were refused');
+      expect(textOf(await asChat('wfr_exec_return_owner', 'read', { paths: ['/workspace/src/app.ts'] })))
+        .not.toContain('Identity recovered');
+      const anonymous = await asChat('wfr_exec_return_owner', 'write_stdin', { session_id: 987002, chars: '' });
+      expect(textOf(anonymous)).toContain('EXEC_SESSION_ANONYMOUS');
+      expect(textOf(anonymous)).toContain('cannot adopt');
+      expect(textOf(anonymous)).not.toContain('retry this same');
+      const absent = await asChat('wfr_exec_return_owner', 'write_stdin', { session_id: 987003, chars: '' });
+      expect(textOf(absent)).toContain('EXEC_SESSION_UNAVAILABLE');
+      expect(textOf(absent)).not.toContain('retry this same');
+      expect(textOf(await asChat('wfr_exec_return_owner', 'read', { paths: ['/workspace/src/app.ts'] })))
+        .not.toContain('Identity recovered');
+    } finally {
+      forgetExecOwner(987001);
+      forgetExecOwner(987002);
+    }
   });
 
   it('keeps a live process with the durable session across Compact & Resume and retires A', async () => {
@@ -3579,7 +3641,7 @@ describe('exec sessions belong to the chat that opened them', () => {
         yield_time_ms: 50
       });
       expect(stolen.body.result?.isError).toBe(true);
-      expect(textOf(stolen)).toContain('is not proven to belong to this durable Chat On Steroids session');
+      expect(textOf(stolen)).toContain('EXEC_SESSION_UNAVAILABLE');
 
       const started = await starting;
       expect(started.body.result?.isError, textOf(started)).not.toBe(true);
@@ -3637,6 +3699,10 @@ describe('exec sessions belong to the chat that opened them', () => {
     expect(textOf(later)).toContain('background-e2e-once');
     expect(textOf(later)).not.toContain(`write_stdin(session_id=${sessionId}`);
 
+    // Publication receipts require a strictly later timestamp; loopback calls can
+    // otherwise share one millisecond even though this response was already read.
+    const receivedAt = Date.now();
+    await vi.waitFor(() => expect(Date.now()).toBeGreaterThan(receivedAt), { timeout: 1000, interval: 1 });
     const after = await asChat('wfr_background_owner', 'read', { paths: ['/workspace/src/app.ts'] });
     expect(textOf(after)).not.toContain(`Background session ${sessionId}`);
     // Receipt publication and the HTTP response complete on adjacent async turns. Under the

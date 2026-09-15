@@ -5,7 +5,7 @@ import { getSession } from './store.js';
 import { onSessionChange, recordProgress } from './recorder.js';
 import { isChatBlocked } from './blocked-chats.js';
 import { draftFastFollowup, conversationMessages, automaticFinishEnabled } from '../goal.js';
-import { hasEligibleToolInput, onInputChange, listInputs, enqueueInput } from './input.js';
+import { hasEligibleToolInput, finishNeedsBrowserInput, onInputChange, listInputs, enqueueInput } from './input.js';
 
 import { logWarn } from '../logger.js';
 import { retryTaskRequest } from '../task-request.js';
@@ -20,6 +20,9 @@ export function getSessionFinishDraft(sessionId: string, turnId: string | null |
   return draft ? { ...draft } : null;
 }
 const finishCalls = new Map<string, number>();
+export function sessionFinishDeadline(startedAt: number): number {
+  return startedAt + 25_000;
+}
 export async function sessionFinishWaiting(sessionId: string, turnId: string | null | undefined, conversationId: string | null): Promise<boolean> {
   return !!turnId && finishCalls.has(`${sessionId}:${turnId}`) &&
     await sessionFinishHeld(sessionId, turnId, conversationId) &&
@@ -86,7 +89,7 @@ async function prepareNotice(sessionId: string, summary: string, userRequested =
     if (!userRequested && !automatic) return result;
     const generated = new Set(inputs.filter(entry => entry.finishOwner).map(entry => entry.id));
     // A request id, timestamp, hold result or app status is not new work. Hash actual
-    // authored context and tool output; identical streaming revisions are the same episode.
+    // authored context; tool-only work cannot change the provider's next decision input.
     const appInput = inputs.filter(entry => entry.sessionId === sessionId && entry.purpose !== 'decision' && !entry.finishOwner &&
       ['tool', 'sent'].includes(entry.state)).slice(-5).map(entry => ({ id: entry.id, text: entry.text }));
     const inputRevision = createHash('sha256').update(JSON.stringify({ mode, appInput })).digest('hex');
@@ -210,6 +213,10 @@ async function waitForFinishBoundary(sessionId: string, turnId: string, conversa
           if (session?.activeTurnId !== turnId || session.conversationId !== conversationId ||
               !(await sessionFinishHeld(sessionId, turnId, conversationId))) return done(false);
           if (await hasEligibleToolInput(sessionId, true)) return done(true);
+          if (await finishNeedsBrowserInput(sessionId)) {
+            await releaseSessionFinish(sessionId, turnId);
+            return done(false);
+          }
         } while (dirty && !closed);
       } catch (error) { done(false, error); }
       finally { checking = false; }
@@ -228,8 +235,7 @@ async function waitForFinishBoundary(sessionId: string, turnId: string, conversa
 }
 
 /** HELD is a model instruction, not a server-side lock on ChatGPT finalization. */
-export async function announceSessionFinish(sessionId: string, summary: string): Promise<string> {
-  const deadline = Date.now() + 25000;
+export async function announceSessionFinish(sessionId: string, summary: string, deadline = sessionFinishDeadline(Date.now())): Promise<string> {
   const session = await getSession(sessionId);
   const call = currentCall();
   if (!session?.activeTurnId || !session.conversationId || call?.caller.sessionId !== sessionId ||

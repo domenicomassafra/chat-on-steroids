@@ -29,19 +29,14 @@
   // those tabs from runtime.onInstalled. The normal static injection can race that recovery
   // on a freshly loaded page, so one live isolated-world recorder stays the invariant.
   //
-  // What that used to be, and why it was wrong: a bare `__CLF_CONTENT_RECORDER_ACTIVE__`
-  // boolean with the note that "a real extension reload invalidates the old isolated world,
-  // so its marker disappears with it". It does not. Chrome keys the isolated world by
-  // extension id and leaves that JS context standing when the extension reloads; what it
-  // invalidates is `chrome.runtime`. The orphan therefore keeps its globals — including
-  // this marker — and the recovery injection from runtime.onInstalled returned at this very
-  // line. The document was then left with a recorder that can never send again, which is
-  // precisely the state that produces a healthy MCP tunnel, a visibly alive MAIN-world
-  // fiber.js, and every single call filed under `Unattributed activity`.
-  //
-  // So: publish a handle instead of a flag and let a replacement supersede a dead one. A
-  // *healthy* incumbent still wins, so the ordinary static/recovery race is unchanged.
-  const RECORDER_VERSION = 11;
+  // Reload invalidates chrome.runtime but can leave the old context's globals and observers
+  // alive. This handle arbitrates reinjection within one context; Chrome can also create a
+  // separate replacement context, which cannot stop an incumbent through its private global.
+  // Every observer therefore checks its OWN runtime synchronously and retires through stop()
+  // before touching the shared DOM. Otherwise old and new composer observers can continually
+  // remove and reinsert each other's controls, starving transport/timers and freezing the tab.
+  // A healthy incumbent in this context still wins the static/recovery injection race.
+  const RECORDER_VERSION = 13;
   const recorderHandle = {
     version: RECORDER_VERSION,
     healthy: () => false,
@@ -89,9 +84,6 @@
    * which nothing downstream reads as anything but the turn having taken that much longer.
    */
   const TURN_SETTLE_MS = 4000;
-  /** Ignore delayed activity for 30s, then listen for fresh work for another 5m. */
-  const THINKING_FAILED_IGNORE_MS = 30_000;
-  const THINKING_FAILED_SETTLE_MS = THINKING_FAILED_IGNORE_MS + 5 * 60 * 1000;
   // While ChatGPT is generating, keep the app-owned transcript close enough to feel like a
   // stream rather than a two-second slideshow. This does not create duplicate rows: /activity
   // is cursor-based, streamBySeq is keyed by canonical seq, and assistant messages additionally
@@ -195,7 +187,6 @@
     events: 0,
     lastKind: null,
     lastAt: 0,
-    requestId: null,
     calls: 0,
     sends: 0,
     failures: 0,
@@ -236,7 +227,7 @@
     let row = trace.get(requestId);
     if (!row) {
       if (trace.size >= TRACE_MAX) trace.delete(trace.keys().next().value);
-      row = { requestId, tool: null, read: 0, sent: 0, app: null, appAt: 0 };
+      row = { requestId, tool: null, read: 0, queued: 0, sent: 0, confirmed: 0, app: null, appAt: 0 };
       trace.set(requestId, row);
     }
     if (stage === 'tool') row.tool = value || row.tool;
@@ -552,9 +543,21 @@
    * budget may. See endOutcome.
    */
   let unwitnessedGeneration = false;
+  // Adoption restores identity, not fresh work. Keep its existing progress revision
+  // so a recovery receipt can distinguish it from activity observed after reload.
+  let adoptedProgressRevision = -1;
   let lastChangeAt = 0;
   let turnProgressRevision = 0; // Distinguish work received within the same millisecond.
-  function noteTurnProgress() {
+  function noteTurnProgress(owner = turnId) {
+    if (owner && turnId && owner !== turnId) return;
+    // A failed view is terminal for input, but fresh work in that exact generation
+    // can resume it. Keep the ordinary generation owner and activity clock.
+    if (!generating && owner && fiberSettled?.localTurnId === owner && fiberSettled.reason === 'thinking_failed') {
+      const pageTurn = fiberSettled.pageTurn;
+      delete fiberSettled.reason;
+      adoptOpenTurn(owner);
+      genNode = pageTurn?.node || null;
+    }
     lastChangeAt = Date.now();
     turnProgressRevision++;
     if (stagePanel?.root.dataset.clfStageKind === 'wait') removeStagePanel();
@@ -929,14 +932,15 @@
   /** The last specific-goal failure, in the app's words, until the next attempt replaces it. */
   let objectiveError = '';
   /**
-   * Goal drafts that this tab has already sent to ChatGPT.
+   * Goal drafts that this tab has already sent or abandoned before Send.
    *
    * Sending and acknowledging are two different network hops. If ChatGPT accepts the message
    * and the following `/goal/ack` misses the app, `/activity` quite correctly offers the same
    * unacknowledged draft again. Treating that as permission to type again duplicates the user's
    * message. Keep a small receipt journal in sessionStorage so the same browser tab also
    * survives a content-script reload between those two hops; a re-offered spent token retries
-   * only its acknowledgement, never the send.
+   * only its acknowledgement, never the send. A `busy:` token retries the native-work
+   * deferral instead of a delivery ACK, preserving the owed continuation after a lost reply.
    */
   const GOAL_SPENT_STORAGE = 'clf-goal-spent-v1';
   const goalSpent = new Set();
@@ -1065,7 +1069,7 @@
       return await chrome.runtime.sendMessage(message);
     } catch (err) {
       const text = String(err && err.message ? err.message : err);
-      if (text.includes('Extension context invalidated')) alive = false;
+      if (text.includes('Extension context invalidated')) recorderHandle.stop();
       return null;
     }
   }
@@ -1267,7 +1271,7 @@
         if (desktopProjectInput && reply.projectBound === desktopProjectInput.id) desktopProjectInput = null;
         for (const entry of batch) {
           if (entry?.event?.kind !== 'tool_evidence') continue;
-          for (const call of entry.event.calls || []) traceStage(call && call.requestId, 'sent');
+          for (const call of entry.event.calls || []) traceStage(call && call.requestId, 'queued');
         }
         const sent = new Set(batch);
         for (let index = queue.length - 1; index >= 0; index--) {
@@ -1397,6 +1401,7 @@
     priorMarks = baselineMarks;
     turnStartedAt = Date.now();
     noteTurnProgress();
+    adoptedProgressRevision = turnProgressRevision;
     quietSince = 0;
     quietTurn = null;
     quietOutcome = null;
@@ -1529,6 +1534,10 @@
   }
 
   function resetConversation() {
+    // First-generation recovery belongs to this conversation. The navigation
+    // epoch already keeps local turn ids distinct across SPA route changes.
+    genCount = 0;
+    unrecordedGeneratingSince = 0;
     seenMessages.clear();
     reportedConversationTitle = '';
     reportedModelSelection = '';
@@ -1725,6 +1734,13 @@
    * whole point of this batch is that the local session log stops containing those.
    */
   function generationTurn(turns = CLF_DOM.turns()) {
+    // Hydration may remount an old answer with a new node after our baseline.
+    // An adopted generation still belongs after the latest question; DOM novelty
+    // above that boundary cannot establish or retain its assistant owner.
+    if (unwitnessedGeneration) {
+      const question = turns.findLastIndex(turn => turn.role === 'user');
+      if (question >= 0) turns = turns.slice(question + 1);
+    }
     if (genNode) {
       const held = turnForNode(genNode, turns);
       if (held) return held;
@@ -1820,13 +1836,15 @@
    * Deliberately conservative. "The model hit its output limit" is a claim this page
    * gives no evidence for, so it is never made: an unexplained stop stays unknown.
    */
-  function endOutcome(turn) {
+  function endOutcome(turn, nativeFinal = false) {
     if (userStopped) return { outcome: 'stopped' };
     // Only this turn's failures. An error inside another turn's section is that turn's,
     // and a toast still on screen from an earlier failure was already on screen when this
     // turn began — neither says anything about how this one ended.
     const failures = CLF_DOM.errors().filter(
-      (error) => !isStale(error.node) && Boolean(turnId) && localErrorGeneration(error) === turnId
+      (error) => !isStale(error.node) && Boolean(turnId) && localErrorGeneration(error) === turnId &&
+        (!nativeFinal || error.recoverable !== true) &&
+        (error.reason !== 'thinking_failed' || unreportedError(error, turnId))
     );
     if (failures.length > 0) {
       const failure = failures.find(error => error.reason !== 'thinking_failed') || failures[0];
@@ -1866,11 +1884,6 @@
    */
   function turnStalled() {
     return turnStartedAt > 0 && Date.now() - lastChangeAt > STALL_MS;
-  }
-
-  function thinkingFailureSettled() {
-    return quietSince > 0 && !quietOutcome?.resumed && pendingTools === 0 && !CLF_DOM.generating() &&
-      Date.now() - quietSince >= THINKING_FAILED_SETTLE_MS;
   }
 
   /** The turn section a node is rendered in, or null. */
@@ -1973,11 +1986,17 @@
           userSendReceipt = null;
         } else {
           const conversationId = CLF_DOM.conversationId();
+          // A durable desktop ACK may precede the activity pull that releases transcript
+          // custody. Keep that exact send identity stronger than later Fiber text spelling.
+          const accepted = receipt.accepted;
+          const acceptedIdentity = accepted?.messageId === message.id &&
+            accepted.conversationId === conversationId && accepted.epoch === epoch;
           const sameConversation = !receipt.conversationId || receipt.conversationId === conversationId;
           const newIdentity = !receipt.previousMessageId || receipt.previousMessageId !== message.id;
           const attachmentsMatch = receipt.text || (receipt.attachmentNames?.length &&
             JSON.stringify(receipt.attachmentNames) === JSON.stringify((userMessageSource(message)?.attachments || []).map(file => file.name).sort()));
-          if (sameConversation && newIdentity && attachmentsMatch && matchesSubmittedUser(message, receipt.text)) {
+          if (sameConversation && newIdentity && attachmentsMatch &&
+              (acceptedIdentity || matchesSubmittedUser(message, receipt.text))) {
             userSendReceipt = null;
             return { messageId: message.id, baseline: receipt.baseline };
           }
@@ -2070,11 +2089,6 @@
     // other named turn by accident. Modern generations always mint/adopt an id; this is the
     // fail-closed guard for stale/legacy/reinjected state.
     const endedTurnId = turnId;
-    // Only this fully observed inactivity boundary grants after-turn delivery.
-    // A new user message can close a failed turn early, but cannot grant that right.
-    if (result.reason === 'thinking_failed' && !thinkingFailureSettled()) {
-      result = { outcome: result.outcome, detail: result.detail };
-    }
     generating = false;
     quietSince = 0;
     quietTurn = null;
@@ -2100,9 +2114,10 @@
       fiberSettled = {
         pageTurnId: ended?.id || null,
         localTurnId: endedTurnId,
-        pageTurn: ended || null
+        pageTurn: ended || null,
+        ...(result.reason === 'thinking_failed' ? { reason: result.reason, endedAt: Date.now() } : {})
       };
-      fiberSettleUntil = Date.now() + FIBER_SETTLE_MS;
+      fiberSettleUntil = Date.now() + (result.reason === 'thinking_failed' ? STALL_MS : FIBER_SETTLE_MS);
     }
     if (endedTurnId && publishFinal && result.outcome === 'completed') {
       void refreshFiber({
@@ -2316,7 +2331,13 @@
     // version that asked only whether *this page load* had journalled the message closed a
     // live turn on every reload, and split every chat's opening turn in two.
     if (generating && newUserMessage) {
-      const ended = quietTurn || generationTurn(observedTurns);
+      // A newly authored question closes the adopted turn before it. If its answer
+      // and this question hydrated together, apply the original-question guard to
+      // that prefix, not to the next turn. Missing exact boundaries stay unowned.
+      const nextQuestion = unwitnessedGeneration ? observedTurns.findIndex(turn =>
+        turn.role === 'user' && CLF_DOM.messagesIn(turn).some(message => message.id === newUserMessage)) : -1;
+      const closingTurns = unwitnessedGeneration ? observedTurns.slice(0, Math.max(0, nextQuestion)) : observedTurns;
+      const ended = quietTurn || generationTurn(closingTurns);
       const fresh = endOutcome(ended);
       const result = quietOutcome && quietOutcome.outcome !== 'unknown' ? quietOutcome : fresh;
       // A new user message is an actual boundary, unlike a disappearing Stop control. Once
@@ -2471,13 +2492,13 @@
       // messages keyed by ChatGPT's own message id. Do not emit a second progress stream.
       // Native activity is emitted by refreshFiber() from ChatGPT's stable thought-message
       // identity. DOM rows alone are presentation and never mint durable page_tool ids.
-      // The native failure has its own inactivity boundary below. The generic
-      // watchdog must not reload it mid-grace, including after a long quiet run.
+      // The exact native failure closes below. Do not also describe it as a
+      // generic stall, including when it appears after a long quiet run.
       const thinkingFailure = quietOutcome?.reason === 'thinking_failed' || visibleErrors.some(
         error => error.reason === 'thinking_failed' && localErrorGeneration(error) === turnId && !isStale(error.node));
       if (!thinkingFailure && !stallReported && Date.now() - lastChangeAt > STALL_MS) {
         stallReported = true;
-        emit({ kind: 'chat_error', text: 'No visible progress for ten minutes. The turn is still marked as generating.', turnId, recoverable: true });
+        emit({ kind: 'chat_error', text: 'No visible progress for ten minutes. The app could not confirm that this turn finished.', turnId, recoverable: true });
       }
     }
 
@@ -2522,19 +2543,7 @@
       // A user stop also overrides the outcome captured on the first quiet observation.
       if (userStopped) quietOutcome = { outcome: 'stopped' };
       let result = quietOutcome || endOutcome(quietTurn || turn);
-      const thinkingFailed = result.reason === 'thinking_failed';
-      if (thinkingFailed && Date.now() >= quietSince + THINKING_FAILED_IGNORE_MS &&
-          (lastChangeAt >= quietSince + THINKING_FAILED_IGNORE_MS || pendingTools > 0)) {
-        // The initial 30s deliberately ignore late deliveries. Work after that
-        // disproves this failure; a stale header cannot stop the resumed model.
-        quietOutcome.resumed = true;
-        if (pendingTools > 0) noteTurnProgress();
-      }
-      if (thinkingFailed && quietOutcome.resumed && turnStalled()) {
-        result = { outcome: 'stalled', detail: 'no visible output and no progress for ten minutes' };
-      }
-      const settled = thinkingFailed && result.outcome !== 'stalled' ? thinkingFailureSettled()
-        : quietFor >= TURN_SETTLE_MS;
+      const settled = result.reason === 'thinking_failed' || quietFor >= TURN_SETTLE_MS;
       // `unknown` means exactly "nothing proves the turn ended". A real
       // answer/error/interrupt closes after the settle window, and ten minutes of genuine
       // silence upgrades itself to `stalled` through endOutcome().
@@ -2583,20 +2592,26 @@
       // owner. An in-turn error whose section cannot be mapped stays unscoped instead of leaking
       // ChatGPT's unrelated page id into the recorder turn-id namespace.
       const recordedTurn = localErrorGeneration(error);
+      // A reload can reveal an old failure while a newer answer is still working.
+      // Only an exact local generation may publish this turn-scoped native header.
+      if (error.reason === 'thinking_failed' && !recordedTurn) continue;
       const scope = recordedTurn || '';
       if (!unreportedError(error, scope)) continue;
       markErrorReported(error, scope);
-      // Recovery can reload as soon as this error reaches the bridge. Commit the
-      // exact broken generation's terminal observation first; the quiet-settle
-      // timer cannot survive that reload. Unowned or informational banners do
-      // not close a generation.
-      if (generating && recordedTurn && recordedTurn === turnId && error.recoverable === true) {
-        finishGeneration(quietTurn || turn, { outcome: userStopped ? 'stopped' : 'failed', detail: error.text });
+      // A transport failure is not a provider terminal boundary: ChatGPT may
+      // still be generating, and reload must adopt this same open generation.
+      // Generic failures use the native quiet/settle path above. Only the exact
+      // Thinking failed header has policy authority to close immediately.
+      if (generating && recordedTurn && recordedTurn === turnId &&
+          error.reason === 'thinking_failed') {
+        finishGeneration(quietTurn || turn, { outcome: userStopped ? 'stopped' : 'failed', detail: error.text,
+          ...(!userStopped && error.reason === 'thinking_failed' ? { reason: error.reason } : {}) });
       }
       emit({
         kind: 'chat_error',
         text: error.text,
         turnId: recordedTurn || undefined,
+        ...(error.reason === 'thinking_failed' ? { reason: error.reason } : {}),
         recoverable: error.recoverable === true,
         // The dialog branch above is the only thing that sets this, and it is what tells the
         // app a provider access limit was identified without the app re-reading the prose.
@@ -2650,11 +2665,9 @@
       seededPath = null;
     }
     const observer = new MutationObserver((records) => {
-      // Recorder takeover cannot disconnect observers created by the predecessor's isolated
-      // world, so `alive` is the ownership fence. Without it every extension reload leaves a
-      // watcher behind that still scans connector mutations and starts a MAIN-world Fiber
-      // round-trip even though sendToWorker() has correctly gone inert.
-      if (!alive || !sameChat()) {
+      // A predecessor in another isolated context must retire on its own runtime validity,
+      // before starting another MAIN-world scan. A failed transport call can arrive too late.
+      if (!recorderHandle.healthy() || !sameChat()) {
         return;
       }
       let sawConnector = false;
@@ -2688,7 +2701,7 @@
     let timer = null;
     let urgentQueued = false;
     const observer = new MutationObserver((records) => {
-      if (!alive || !sameChat()) return;
+      if (!recorderHandle.healthy() || !sameChat()) return;
       // Attribute-only native updates matter when React reuses the submit button.
       // Ignore unrelated styling/Fiber stamps; they cannot change composer readiness.
       if (records.every(record => record.type === 'attributes')) {
@@ -3328,7 +3341,10 @@
   }
 
   async function confirmLiveRequestOwners(calls, ownerConversation, current = null) {
-    if (current && !current()) return;
+    const ownerEpoch = epoch;
+    const owns = () => alive && epoch === ownerEpoch && conversationId === ownerConversation &&
+      CLF_DOM.conversationId() === ownerConversation && (!current || current());
+    if (!owns()) return;
     if (!Array.isArray(calls) || calls.length === 0 || !ownerConversation) return;
     const byRequest = new Map();
     for (const call of calls) {
@@ -3338,6 +3354,7 @@
       if (requestOwnersPending.has(key) || (requestOwnerRetryAt.get(key) || 0) > Date.now()) continue;
       byRequest.set(call.requestId, call);
       requestOwnersPending.add(key);
+      traceStage(call.requestId, 'read');
     }
     const batch = [...byRequest.values()];
     if (batch.length === 0) return;
@@ -3346,27 +3363,30 @@
         type: 'correlate',
         conversationId: ownerConversation,
         calls: batch
-      }, current);
-      if (current && !current()) return;
+      }, owns);
+      if (!owns()) return;
       const data = reply && reply.ok === true && reply.data && typeof reply.data === 'object' ? reply.data : null;
       const confirmed = new Set(data && Array.isArray(data.confirmed) ? data.confirmed : []);
       for (const call of batch) {
         const key = `${ownerConversation}\u0000${call.requestId}`;
+        // Only an app response proves delivery. The worker accepting a journal entry
+        // is queued custody, and an owner ACK still does not prove an MCP call ran.
+        if (data?.conversationId === ownerConversation) traceStage(call.requestId, 'sent');
         // Judge each request id on its own read-back. This additionally required
         // `data.complete === true`, which is a *batch* verdict: a single id the app could
         // not place (a sticky conflict, or a call it has not ingested yet) threw away the
         // confirmation of every other id in the same message and re-queued them all.
         if (!data || data.conversationId !== ownerConversation || !confirmed.has(call.requestId)) {
           backOffRequestOwner(key);
+          if (data?.conversationId === ownerConversation && Array.isArray(data.conflicts) && data.conflicts.includes(call.requestId))
+            pendingStreamOrigins.delete(call.requestId);
           continue;
         }
         requestOwnerRetryAt.delete(key);
         requestOwnerAttempts.delete(key);
         requestOwnersConfirmed.set(call.requestId, ownerConversation);
-        // `app` becomes green only after the app has read the exact mapping back. This is a
-        // stronger diagnostic than the old "Fiber parser saw an id" indicator.
-        traceStage(call.requestId, 'sent');
-        traceStage(call.requestId, 'app', 'request_id');
+        pendingStreamOrigins.delete(call.requestId);
+        traceStage(call.requestId, 'confirmed');
       }
     } catch {
       for (const call of batch) backOffRequestOwner(`${ownerConversation}\u0000${call.requestId}`);
@@ -3447,13 +3467,13 @@
     const ownedPageNode = exactOwner?.pageTurn || null;
     const ownedPageTurnId = exactOwner?.pageTurnId || null;
     let ownedPageTurn = stampedFiberTurn(ownedPageNode, answer.turns, answer.scanToken);
-    if (!ownedPageTurn && ownedPageTurnId) {
-      for (let index = answer.turns.length - 1; index >= 0; index--) {
-        if (answer.turns[index].turnId === ownedPageTurnId) {
-          ownedPageTurn = answer.turns[index];
-          break;
-        }
-      }
+    if (!ownedPageTurn && ownedPageTurnId &&
+        CLF_DOM.turns().filter(turn => turn.id === ownedPageTurnId).length === 1) {
+      // A page id is only a hint when it is unique on both sides of this scan.
+      // An empty new response may have no descriptor yet; with a recycled id,
+      // choosing the last match then borrows the previous response's final.
+      const candidates = answer.turns.filter(turn => turn.turnId === ownedPageTurnId);
+      if (candidates.length === 1) ownedPageTurn = candidates[0];
     }
     // A destination Resume has a second exact owner that is even more fundamental than this
     // document's local generation: the *durably accepted* continuation marker and the answer
@@ -3522,7 +3542,6 @@
     observed.calls = acceptedCalls.length;
     for (const call of acceptedCalls) {
       if (!call.requestId) continue;
-      observed.requestId = call.requestId;
       traceStage(call.requestId, 'read');
       traceStage(call.requestId, 'tool', call.tool);
     }
@@ -3759,7 +3778,7 @@
           const signature = `${activity.label}\u0000${owner}`;
           if (pageToolsReported.get(activity.messageId) === signature) continue;
           pageToolsReported.set(activity.messageId, signature);
-          if (generating && index === activeTurnIndex) noteTurnProgress();
+          if (owner) noteTurnProgress(owner);
           emit({
             kind: 'page_tool',
             text: activity.label,
@@ -3829,8 +3848,8 @@
           `${state}\u0000${message.rawText}\u0000${message.renderedHtml}\u0000${owner}` +
           `\u0000${message.createTime || ''}\u0000${message.rawMessageId || ''}`;
         if (priorMessage?.signature === signature) continue;
-        messagesReported.set(message.messageId, { signature, owner, conflicted: ownerConflict });
-        if (state === 'streaming') noteTurnProgress();
+        messagesReported.set(message.messageId, { signature, owner, conflicted: ownerConflict, text: message.rawText });
+        if (state === 'streaming' && owner && priorMessage?.text !== message.rawText) noteTurnProgress(owner);
         const liveAssistant =
           Boolean(localOwner) ||
           (generating && (index === activeTurnIndex || (activeTurnIndex < 0 && index === answer.turns.length - 1)));
@@ -3847,7 +3866,7 @@
           // locally-owned turn, first observation is the comparable clock. Historical backfill
           // has no local turn anchor, so it keeps authored create_time instead.
           ...(!liveAssistant && message.createTime ? { time: message.createTime, authoredTime: true } : {}),
-          ...(liveAssistant ? { activeNow: true } : {}),
+          ...(liveAssistant && (state === 'final' || priorMessage?.text !== message.rawText) ? { activeNow: true } : {}),
           state,
           final: state === 'final',
           ...(state === 'final' && localOwner && goalTerminalCandidate('completed', localOwner, markedTurns.some(([, marked]) =>
@@ -3877,8 +3896,10 @@
       fiberTerminalMessageId = answer.turns[activeTurnIndex].endMessageId;
       const ended = generationTurn();
       if (ended) {
-        const local = endOutcome(ended);
-        // A later exact native final supersedes the stale Thinking failed header.
+        // Native completion resolves transport uncertainty even when its old
+        // banner remains mounted; explicit user stop still wins in endOutcome.
+        const local = endOutcome(ended, true);
+        // A later exact native final also supersedes the stale Thinking failed header.
         finishGeneration(ended, local.outcome === 'unknown' || local.reason === 'thinking_failed'
           ? { outcome: 'completed' } : local, false);
       }
@@ -3919,6 +3940,25 @@
       found = descriptor;
     }
     return found;
+  }
+
+  // Popup-only projection of the newest native turn. Historical scans and delivery
+  // counters cannot certify the current request; a newer user message clears the view.
+  function currentRequestStatus() {
+    const latest = CLF_DOM.turns().at(-1);
+    const descriptor = latest?.role === 'assistant' && CLF_DOM.conversationId() === conversationId
+      ? fiberTurnFor(latest) : null;
+    if (!descriptor || descriptor.conversationId !== conversationId) return { requestId: null, trace: [] };
+    const ids = [...new Set([...(descriptor.requests || []), ...(descriptor.calls || [])]
+      .map(call => call.requestId).filter(Boolean))].slice(-16);
+    const rows = ids.map(requestId => ({
+      ...trace.get(requestId), requestId, read: true,
+      sent: Boolean(trace.get(requestId)?.sent || requestOwnersConfirmed.get(requestId) === conversationId),
+      confirmed: requestOwnersConfirmed.get(requestId) === conversationId
+    })).reverse();
+    // Prefer the workflow identity over a provider's preliminary wrapper UUID.
+    const preferred = rows.find(row => row.requestId.startsWith('wfr_')) || rows[0];
+    return { requestId: preferred?.requestId || null, trace: rows };
   }
 
   /** Fiber turn descriptor stamped onto exactly one rendered assistant section. */
@@ -5694,10 +5734,10 @@
    * contract sends the rewrite under `origin`: the repair row that turns from "Trying to
    * reload…" into "Reloaded…" is one row, and the page can only show that if it takes it.
    */
-  const UPSERT_KINDS = new Set(['progress', 'page_tool']);
+  const UPSERT_KINDS = new Set(['progress', 'page_tool', 'tool_call']);
 
   /** What a stream entry currently says, whichever field its kind keeps it in. */
-  const snapshotText = (entry) => (entry ? (entry.kind === 'page_tool' ? entry.label : entry.text) : undefined);
+  const snapshotText = (entry) => (entry ? (entry.kind === 'tool_call' ? JSON.stringify(entry.summary) : entry.kind === 'page_tool' ? entry.label : entry.text) : undefined);
 
   let settingsPulling = false;
 
@@ -5809,6 +5849,9 @@
       const isWork = (entry) =>
         entry &&
         entry.turnId === turnId &&
+        !(entry.kind === 'tool_call' && entry.process && entry.process.completedAt !== undefined) &&
+        !(entry.kind === 'assistant_message' && (entry.final === true || entry.state === 'final')) &&
+        !(fiberSettled?.reason === 'thinking_failed' && entry.time <= fiberSettled.endedAt) &&
         !browserRepairRow(entry) &&
         (entry.kind === 'tool_call' ||
           entry.kind === 'page_tool' ||
@@ -5842,7 +5885,7 @@
           ) {
             settlePresentation();
           }
-          if (changed && generating && isWork(entry)) exactTurnActivity = true;
+          if (changed && isWork(entry)) exactTurnActivity = true;
           continue;
         }
         // Commentary and native tool rows arrive again as they change, under the seq they
@@ -5850,7 +5893,7 @@
         // per redraw, and one tool row instead of one per relabel. So a repeat of a seq we
         // hold replaces it rather than being discarded as already seen.
         //
-        // Both kinds, not just progress. `page_tool` supersession was added on the app side
+        // Native labels and process statuses, not just progress. `page_tool` supersession was added on the app side
         // and then dropped here, because a held entry of any other kind fell straight
         // through this guard: `Inspecting files` could never become `Inspected files`.
         const held = streamBySeq.get(seq);
@@ -5860,7 +5903,7 @@
         }
         streamBySeq.set(seq, entry);
         streamAdded++;
-        if (generating && isWork(entry)) exactTurnActivity = true;
+        if (isWork(entry)) exactTurnActivity = true;
       }
       if (streamAdded > 0) trimStream();
       if (exactTurnActivity) noteTurnProgress();
@@ -5873,7 +5916,8 @@
         // Ask for what comes *after* this one next time. Asking from `seq` itself is the
         // bug that made the feed repeat its last entry forever.
         if (seq >= since) since = seq + 1;
-        if (bySeq.has(seq)) continue;
+        const prior = bySeq.get(seq);
+        if (prior && (prior.callId !== entry.callId || snapshotText({ ...prior, kind: 'tool_call' }) === snapshotText({ ...entry, kind: 'tool_call' }))) continue;
         bySeq.set(seq, entry);
         added++;
       }
@@ -5887,14 +5931,19 @@
       // resumeOpenTurn(), on the boot pull, and only to work out whether this document is
       // standing in the middle of a turn a previous one opened. See adoptTurnId.
       appActiveTurnId = typeof data.activeTurnId === 'string' && data.activeTurnId ? data.activeTurnId : null;
+      if (!generating && pendingTools > 0 && appActiveTurnId === turnId && fiberSettled?.reason === 'thinking_failed') noteTurnProgress();
       if (resumeIdentityPending) {
+        // Runtime activity can expire while the durable generation still owns
+        // this question. Reload must retain that identity without turning the
+        // expired activity projection into a new user send.
+        const recordedTurnId = typeof data.recordedTurnId === 'string' && data.recordedTurnId ? data.recordedTurnId : appActiveTurnId;
         // A reopened Stop target must prove the original question before adoption
         // can anchor native messages under its old local turn. Hydration may lag
         // this first response; retain the existing gate until proof or expiry.
-        const stopReady = !data.stopTurn || (data.stopTurn.turnId === appActiveTurnId && stopQuestionMatches(data.stopTurn.userMessageId));
-        if (!appActiveTurnId || stopReady) {
+        const stopReady = !data.stopTurn || (data.stopTurn.turnId === recordedTurnId && stopQuestionMatches(data.stopTurn.userMessageId));
+        if (!recordedTurnId || stopReady) {
           resumeIdentityPending = false;
-          if (appActiveTurnId) adoptOpenTurn(appActiveTurnId, data.stopTurn?.userMessageId ?? null);
+          if (recordedTurnId) adoptOpenTurn(recordedTurnId, data.stopTurn?.userMessageId ?? null);
         }
       }
       tokens = Number.isFinite(Number(data.tokens)) ? Number(data.tokens) : 0;
@@ -7706,14 +7755,14 @@
     const dest = backend === 'chatgpt' ? 'ChatGPT helper' : backend === 'templates' ? 'offline templates'
       : goal.provider === 'custom' ? 'custom endpoint' : 'OpenRouter';
     const bar = (at, done = false) => ({ steps: GOAL_STEPS, at, done });
-    const failure = goal.error || (draft && draft.stage === 'failed' ? draft.error || `${dest} did not answer` : '');
+    const failure = goal.error || (draft && draft.stage === 'failed' ? draft.message || draft.error || `${dest} did not answer` : '');
     if (failure) {
       const at = draft && draft.stage === 'failed' ? 2 : (GOAL_STEP_AT[goal.phase] ?? 1);
       if (goal.phase === 'retrying') {
         const seconds = Math.round((goal.retryMs || GOAL_RETRY_MS) / 1000);
         return { stage: `Retrying Goal in ${seconds} seconds`, detail: failure, body: '', kind: 'goal', ...bar(at) };
       }
-      return { stage: 'The goal loop stopped', detail: failure, body: '', kind: 'goal-error', ...bar(at) };
+      return { stage: goal.mode === 'loop' ? 'Loop continuation paused' : 'The goal loop stopped', detail: failure, body: '', kind: 'goal-error', ...bar(at) };
     }
     // A chat opening on a specific goal. There is no answer to read and no turn to settle,
     // so the first two steps of the ordinary run simply did not happen; saying "sending the
@@ -7729,8 +7778,13 @@
       // the reply for the same reason — there was never anything to send.
       return { stage: 'Goal reached', detail: 'nothing was sent', body: '', kind: 'goal-done', ...bar(2, true) };
     }
-    if (goal.phase === 'settling') {
-      return { stage: 'Checking the answer is finished', detail: '', body: '', kind: 'goal', ...bar(0) };
+    if (goal.phase === 'settling' || (!draft && goal.wait)) {
+      const wait = goal.wait;
+      const seconds = wait?.until ? Math.max(0, Math.ceil((wait.until - Date.now()) / 1000)) : 0;
+      const detail = seconds ? `Checking again in ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : '';
+      const stage = wait?.reason === 'native-busy' ? 'ChatGPT resumed work · waiting before retry' : wait?.reason === 'silence' ? 'Waiting before recovery reload' : wait?.reason === 'quiet' ? 'Waiting for tool inactivity' :
+        wait?.reason === 'tools' ? 'Waiting for running tools' : wait?.reason === 'listening' ? 'Waiting for activity after recovery' : 'Checking the answer is finished';
+      return { stage, detail, body: '', kind: 'goal', ...bar(0) };
     }
     if (goal.phase === 'sending' && draft && draft.reply) {
       return { stage: 'Sending it to ChatGPT', detail: '', body: draft.reply, kind: 'goal', ...bar(3) };
@@ -8688,7 +8742,7 @@
     // The accepted helper user receipt and current provider terminal own its result.
     // A renderer lifecycle edge must not create a second, captured-node owner.
     if (desktopDecision && desktopDecision.onTarget()) return;
-    if (!endedTurnId || !goalUsable()) return;
+    if (!endedTurnId || !goalUsable() || goalConfig?.queuePending) return;
     // Only a finished, non-partial answer. See GOAL_CONTINUABLE for why every other outcome —
     // including `interrupted` — belongs to recovery rather than to this loop.
     if (!GOAL_CONTINUABLE.has(outcome)) return;
@@ -8789,14 +8843,14 @@
   function maybeRecoverDurableGoalTurn() {
     const pending = goalConfig && goalConfig.pending;
     if (!pending || !pending.replyId || !pending.turnId || !conversationId) return;
-    if (!goalUsable() || goalBusy || (pending.listenUntil ?? 0) > Date.now()) return;
+    if (!goalUsable() || goalConfig?.queuePending || goalBusy || (pending.listenUntil ?? 0) > Date.now()) return;
     if (pending.silencePro && CLF_DOM.generating()) {
       goalBusy = true;
       void ask({ type: 'goal_draft', conversationId, turnId: pending.turnId, nativeBusy: true })
         .finally(() => { goalBusy = false; });
       return;
     }
-    if (goalDraft || (generating && !pending.silencePro) || CLF_DOM.generating()) return;
+    if (goalDraft || (generating && !goalRecoveryReady(pending)) || CLF_DOM.generating()) return;
     if (nativeBusy || (job && job.busy)) return;
     const acceptedAt = Number(pending.acceptedAt);
     const ticketId = `${pending.replyId}:${Number.isFinite(acceptedAt) && acceptedAt > 0 ? acceptedAt : pending.eventSeq}`;
@@ -8861,16 +8915,12 @@
           continue;
         }
         if (Date.now() - stableSince < GOAL_STABLE_MS) continue;
-        // An answer with nothing in it is not an answer to continue from, and asking a model
-        // to write the user's next message about it would be asking it to invent one.
-        // Two dead ends, and until now neither left a mark: the panel simply went away,
-        // which from outside is indistinguishable from a loop that never ran at all. That is
-        // most of "auto goal didn't fire" — it may well have fired, looked at this turn and
-        // declined it without ever saying so. The three exits above stay silent because each
-        // of them means the conversation moved on and there is nothing to report; these two
-        // mean the loop gave up on a turn it was watching, and now say which.
+        // Tool-only completion belongs to the existing app recovery window. The
+        // confirmed reload/listening receipt will supply a synthetic source ticket;
+        // empty final prose neither stops the mode nor authorizes an immediate draft.
         if (!text.trim()) {
-          setGoalPhase('settling', 'that answer had no text to continue from');
+          setGoalPhase('');
+          void pullActivity();
           return;
         }
         await requestGoalDraft(forTurn, current);
@@ -8914,13 +8964,15 @@
     // A turn that finished during the wait has taken the claim, and this retry is about an
     // older one. It says nothing and touches nothing: the phase on screen is that turn's now.
     if (!current()) return;
-    // Something else holds the loop while this turn is still the claimed one — a compaction
-    // brief, say. It will not be interrupted for a retry.
-    if (goalBusy) return;
-    // The conversation moved on while we waited: whatever this loop was going to write is
-    // about a turn that is no longer the last one, which is an answer of its own.
-    if (generating || CLF_DOM.generating() || nativeBusy || (job && job.busy)) return void setGoalPhase('');
-    if (!goalUsable()) return void setGoalPhase('');
+    if (goalBusy || goalSourceGenerating() || CLF_DOM.generating() || nativeBusy || (job && job.busy) || !goalUsable()) {
+      // This timer no longer owns a retry. Return its pickup to the existing
+      // activity feed: retaining the claim here strands still-owed recovery after
+      // temporary work/compaction ends. Only a current server obligation can collect
+      // it again; no draft is acknowledged and the elapsed backoff is not bypassed.
+      goalTicketId = null;
+      if (!goalBusy) setGoalPhase('');
+      return;
+    }
     goalBusy = true;
     try {
       await requestGoalDraft(forTurn, current);
@@ -8932,10 +8984,14 @@
   }
 
   /** Asks the app to draft the next user message. The answer arrives on the activity feed. */
-  function goalSourceGenerating() {
-    const pending = goalConfig?.pending;
-    return generating && !(pending?.silencePro && pending.turnId === goalTurnId &&
-      pending.acceptedAt >= lastChangeAt && pendingTools === 0);
+  function goalRecoveryReady(pending) {
+    return Boolean(pending?.silenceSourceTurnId && (pending.listenUntil ?? 0) <= Date.now() && pendingTools === 0 &&
+      (!generating || (pending.silenceSourceTurnId === turnId &&
+        (pending.acceptedAt >= lastChangeAt || (unwitnessedGeneration && adoptedProgressRevision === turnProgressRevision)))));
+  }
+
+  function goalSourceGenerating(forTurn = goalTurnId) {
+    return generating && !(goalConfig?.pending?.turnId === forTurn && goalRecoveryReady(goalConfig.pending));
   }
 
   async function requestGoalDraft(forTurn, current, terminalRequired = false) {
@@ -8952,6 +9008,14 @@
       // HTTP failures retain call()'s { ok, status, data } envelope; worker/transport
       // failures have top-level fields. Keep the machine code separate from display text.
       const failure = reply?.data || reply || {};
+      if (failure.error === 'user_input_pending') {
+        // The outbox owns this step. Relinquish only the page's pickup so a
+        // cancelled queue can later collect the still-owed durable Goal turn.
+        goalTurnId = null;
+        goalTicketId = null;
+        setGoalPhase('');
+        return;
+      }
       // The app still has this chat working — its record of the turn is open, or a local
       // tool ran within the last minute — so the end this page saw was not the answer. Not
       // a failure, and not a released claim either: the obligation is filed app-side, and
@@ -8997,6 +9061,23 @@
    * a half-written message is never overwritten; this waits a while for it to be free and
    * then gives up honestly rather than typing over somebody mid-sentence.
    */
+  async function deferGoalDraftForWork(draft) {
+    const target = draft.conversationId, forEpoch = epoch;
+    rememberGoalSpent(target, `busy:${draft.token}`);
+    if (goalDraft?.token === draft.token) goalDraft = null;
+    const wasBusy = goalBusy;
+    goalBusy = true;
+    setGoalPhase('settling');
+    try {
+      const result = await ask({ type: 'goal_ack', conversationId: target, token: draft.token, nativeBusy: true });
+      if (!alive || epoch !== forEpoch || conversationId !== target || !result?.ok) return;
+      if (goalTurnId === draft.turnId) { goalTurnId = null; goalTicketId = null; }
+      setGoalPhase('');
+    } finally {
+      if (alive && epoch === forEpoch && conversationId === target) goalBusy = wasBusy;
+    }
+  }
+
   async function maybeSendGoalReply() {
     const draft = goalDraft;
     if (!draft || !conversationId || draft.conversationId !== conversationId) return;
@@ -9011,6 +9092,8 @@
       await ask({ type: 'goal_ack', conversationId, token: draft.token }).catch(() => undefined);
       return;
     }
+    if (goalWasSpent(conversationId, `busy:${draft.token}`)) return deferGoalDraftForWork(draft);
+    if (goalConfig?.queuePending) return;
     if (!goalUsable()) {
       // Settings are live. Turning Goal Mode off (or removing its key) while OpenRouter is
       // drafting must revoke permission to type the result, even if that result becomes ready
@@ -9022,7 +9105,7 @@
     }
     if (draft.stage === 'failed') {
       goalDraft = null;
-      const why = draft.error || `${draft.backend === 'chatgpt' ? 'ChatGPT helper' : draft.backend === 'templates' ? 'Offline templates' : goalConfig && goalConfig.provider === 'custom' ? 'custom endpoint' : 'OpenRouter'} did not answer`;
+      const why = draft.message || draft.error || `${draft.backend === 'chatgpt' ? 'ChatGPT helper' : draft.backend === 'templates' ? 'Offline templates' : goalConfig && goalConfig.provider === 'custom' ? 'custom endpoint' : 'OpenRouter'} did not answer`;
       const pending = goalConfig && goalConfig.pending;
       let retrying = draft.retryable === true && goalTurnId === draft.turnId;
       // A reload loses the document-local claim while the app keeps both the failed attempt
@@ -9035,7 +9118,7 @@
         !goalTurnId &&
         pending &&
         pending.turnId === draft.turnId &&
-        !generating &&
+        !goalSourceGenerating(draft.turnId) &&
         !CLF_DOM.generating() &&
         !nativeBusy &&
         !(job && job.busy)
@@ -9063,15 +9146,15 @@
     if (draft.stage !== 'ready' || !draft.reply) return;
     // A turn started while the draft was being written — the user typed, or ChatGPT began
     // something of its own. The draft is about a conversation that has moved on.
-    if (goalSourceGenerating() || CLF_DOM.generating() || nativeBusy || (job && job.busy)) {
-      goalDraft = null;
-      setGoalPhase('');
-      await ask({ type: 'goal_ack', conversationId, token: draft.token }).catch(() => undefined);
+    const sourceBusy = () => goalSourceGenerating(draft.turnId) || CLF_DOM.generating() || pendingTools > 0 ||
+      nativeBusy || job?.busy || turnProgressRevision !== workRevision;
+    if (sourceBusy()) {
+      await deferGoalDraftForWork(draft);
       return;
     }
     goalBusy = true;
     const composerBefore = CLF_DOM.composer()?.textContent || '';
-    let preparedDraft = null, sendAttempted = false;
+    let preparedDraft = null, sendAttempted = false, workResumed = false;
     try {
       if (goalTypingSince === 0) goalTypingSince = Date.now();
       setGoalPhase('sending');
@@ -9092,19 +9175,23 @@
       preparedDraft = CLF_DOM.captureComposerDraft(CLF_DOM.composer()?.textContent || '', onDocument);
       await sleep(200);
       const current = () => onDocument() && goalUsable() &&
-        (sendAttempted || ((goalConfig?.afterTurn !== true || turnProgressRevision === workRevision) &&
+        (sendAttempted || (((goalConfig?.afterTurn !== true && !goalConfig?.pending?.silenceSourceTurnId) || turnProgressRevision === workRevision) &&
           goalDraft?.token === draft.token && preparedDraft.current()));
       if (!current()) return;
       const sent = await sendSubmittedText(current, true, async sendCurrent => {
         // Off or a replacement task retires this exact token in the app. Re-read it
         // when native Send is ready, including after a delayed React update.
         const authorization = await ask({ type: 'activity', conversationId: target, since });
+        if (onDocument() && (sourceBusy() || authorization?.data?.pendingTools > 0 || authorization?.data?.job?.busy)) {
+          workResumed = true;
+          return false;
+        }
         if (!sendCurrent() || !current() || !authorization?.ok || !authorization.data) return false;
         const allowed = authorization.data.goal;
         const ready = allowed?.draft;
         if (!allowed || !ready || ready.token !== draft.token || ready.stage !== 'ready' || ready.reply !== draft.reply ||
             !(allowed.enabled === true || (allowed.own !== true && allowed.objective)) || allowed.hasKey !== true ||
-            allowed.blocked || authorization.data.job?.busy || authorization.data.pendingTools > 0 ||
+            allowed.blocked || allowed.queuePending || authorization.data.job?.busy || authorization.data.pendingTools > 0 ||
             goalSourceGenerating() || CLF_DOM.generating() || nativeBusy || job?.busy) return false;
         rememberUserSend();
         sendAttempted = true;
@@ -9130,6 +9217,7 @@
         CLF_DOM.insertPrompt(composerBefore, true);
       preparedDraft?.dispose();
       if (!onDocument()) return;
+      if (!sendAttempted && (workResumed || sourceBusy())) await deferGoalDraftForWork(draft);
       goalBusy = false;
       // Only once the draft is spent. This marks when *this draft* first found the composer
       // in use, and the retry path above measures its two-minute patience against it — so
@@ -9220,7 +9308,7 @@
   function replyError(reply) {
     if (!reply) return '';
     const data = reply.data || {};
-    if (data.message) return String(data.message).slice(0, 160);
+    if (data.message) return String(data.message).slice(0, 600);
     if (data.error === 'session_not_recorded') return 'This chat has no recorded local session yet.';
     if (data.error === 'compaction_running') return 'Another chat is compacting right now.';
     if (data.error === 'turn_still_generating') return 'Wait for this ChatGPT turn to finish first.';
@@ -9855,7 +9943,7 @@
       if (exactBootstrapDraft()) return false;
       if (boot.type === 'resume' && !squeeze(CLF_DOM.composer()?.textContent)) {
         continuationJournalPending = false;
-        await ask({ type: 'compact', token: resumeMarker[2], destinationLost: true });
+        await ask({ type: 'compact', token: resumeMarker[2], commandId: boot.id, client: RUN_ID, destinationLost: true });
         return true;
       }
       await fail('the composer changed during bootstrap authorization; the draft was preserved and nothing was sent');
@@ -9878,7 +9966,7 @@
         return void (await fail('the resume bootstrap had no valid continuation marker'));
       }
       continuationJournalPending = true;
-      const permit = await ask({ type: 'compact', token: resumeMarker[2], destinationAttempt: true });
+      const permit = await ask({ type: 'compact', token: resumeMarker[2], commandId: boot.id, client: RUN_ID, destinationAttempt: true });
       if (await rejectChangedBootstrap()) return;
       if (!permit || permit.ok !== true || !permit.data || permit.data.allowed !== true) {
         await bootstrapDraft.clear();
@@ -9886,7 +9974,7 @@
       }
       // As on the source side: the claim above promises nothing was submitted, and this second
       // write is the exclusive cut taken immediately before the click.
-      const armed = await ask({ type: 'compact', token: resumeMarker[2], destinationDispatch: true });
+      const armed = await ask({ type: 'compact', token: resumeMarker[2], commandId: boot.id, client: RUN_ID, destinationDispatch: true });
       if (await rejectChangedBootstrap()) return;
       if (!armed || armed.ok !== true || !armed.data || armed.data.armed !== true) {
         await bootstrapDraft.clear();
@@ -9997,7 +10085,7 @@
     // hook, and a loop that ticked there could pass a case by accident on a stray tick.
     if (TEST_MODE) return;
     const tick = () => {
-      if (!alive) return;
+      if (!recorderHandle.healthy()) return;
       try {
         const result = fn();
         if (result && typeof result.catch === 'function') result.catch(() => undefined);
@@ -10039,7 +10127,7 @@
     if (activityTimer !== null) return;
     activityTimer = later(async () => {
       activityTimer = null;
-      if (!alive) return;
+      if (!recorderHandle.healthy()) return;
       try {
         await pullActivity();
       } catch {
@@ -10072,7 +10160,11 @@
   function watchComposer() {
     try {
       const observer = new MutationObserver(() => {
-        if (!alive) return;
+        // A reloaded extension can have a new isolated world before this old world's
+        // next transport/timer notices invalidation. It must not reinsert the controls
+        // its successor just removed: two composer observers would fight in microtasks
+        // forever, starving the very timer that could otherwise retire the old recorder.
+        if (!recorderHandle.healthy()) return;
         if (!control || !control.root.isConnected) injectControl();
         if (stagePanel && !stagePanel.root.isConnected) injectStage();
       });
@@ -10122,16 +10214,17 @@
   });
   function flushStreamRequestOrigins() {
     const route = CLF_DOM.conversationId();
+    const pendingEpoch = epoch, calls = [];
     for (const [requestId, pending] of pendingStreamOrigins) {
       if (!alive || pending.epoch !== epoch || Date.now() >= pending.deadline || (route && route !== pending.conversationId)) {
         pendingStreamOrigins.delete(requestId);
         continue;
       }
       if (route !== pending.conversationId || conversationId !== route) continue;
-      pendingStreamOrigins.delete(requestId);
-      const current = () => alive && epoch === pending.epoch && CLF_DOM.conversationId() === route;
-      void confirmLiveRequestOwners([{ requestId, messageId: null, createTime: pending.observedAt / 1000 }], route, current);
+      calls.push({ requestId, messageId: null, createTime: pending.observedAt / 1000 });
     }
+    const current = () => alive && epoch === pendingEpoch && CLF_DOM.conversationId() === route;
+    if (calls.length) void confirmLiveRequestOwners(calls, route, current);
   }
   function confirmStreamRequestOrigin(claimed, requestIds, observedAt) {
     const route = CLF_DOM.conversationId();
@@ -10139,8 +10232,8 @@
     // New chats can receive their stream id before /c/<id>. The existing observer
     // drains a bounded set when that exact route appears; navigation retires it.
     for (const requestId of requestIds) {
-      if (pendingStreamOrigins.has(requestId) || pendingStreamOrigins.size >= 16) continue;
-      pendingStreamOrigins.set(requestId, { conversationId: claimed, observedAt, epoch, deadline: Date.now() + 30_000 });
+      if (requestOwnersConfirmed.get(requestId) === claimed || pendingStreamOrigins.has(requestId) || pendingStreamOrigins.size >= 16) continue;
+      pendingStreamOrigins.set(requestId, { conversationId: claimed, observedAt, epoch, deadline: Date.now() + 15 * 60_000 });
     }
     flushStreamRequestOrigins();
   }
@@ -10174,7 +10267,7 @@
     decision.publishing = true;
     void ask({ type: 'desktop_input', id: decision.id, owner: decision.owner, lifetime: decision.temporary ? 'temporary-planner' : undefined, response: decision.response }).then((reply) => {
       if (reply?.data?.ok === true && desktopDecision === decision && alive && epoch === decision.epoch && CLF_DOM.conversationId() === decision.conversationId) {
-        // Keep this exact temporary receipt until maintenance retires this planner.
+        // Keep the exact receipt if immediate closure was vetoed; maintenance may retire it.
         // Its owner/text proves later safe closure without publishing the answer twice.
         if (decision.temporary) decision.accepted = true;
         else desktopDecision = null;
@@ -10245,7 +10338,6 @@
 
   async function acceptDesktopInput(message) {
     const silencePickup = typeof message.silenceTurnId === 'string';
-    if (silencePickup && quietOutcome?.reason === 'thinking_failed' && !quietOutcome.resumed && !thinkingFailureSettled()) return false;
     let sourceQuiet = silencePickup;
     if (desktopInputBusy || modelCatalogBusy || !alive || (generating && !message.directTurn && !silencePickup) || pendingTools > 0 || goalBusy || job?.busy) return false;
     const target = message.conversationId || null;
@@ -10324,7 +10416,7 @@
         CLF_DOM.confirmTemporaryChatIntroduction();
         await waitPageView(() => CLF_DOM.temporaryChatReady(), onTarget, 3000);
       }
-      if (temporary && (!temporaryPlannerPage() || !CLF_DOM.temporaryChatReady())) return fail('Temporary Chat was not confirmed. Open the planner tab and complete its Temporary Chat introduction.');
+      if (temporary && (!temporaryPlannerPage() || !CLF_DOM.temporaryChatReady())) return fail('Temporary Chat was not confirmed. Open the helper tab and complete its Temporary Chat introduction.');
       const providerLimitation = () => CLF_DOM.errors().find(error => error.blocking === true)?.text;
       const limitation = providerLimitation();
       if (limitation) return fail(limitation);
@@ -10376,6 +10468,8 @@
         return { conversation, user: users.at(-1) };
       }, sendingTarget, 15000);
       if (!receipt) return false;
+      // Native Send listeners refresh the receipt; pin only that witnessed object.
+      const witnessedSendReceipt = userSendReceipt;
       const deliveredConversation = receipt.conversation;
       sent = true;
       if (decision) {
@@ -10389,6 +10483,14 @@
       // The claim remains inert if this ACK is lost; no duplicate send after a reload.
       const acknowledged = await ask({ type: 'desktop_input', id: message.id, conversationId: deliveredConversation, messageId: receipt.user?.id, owner: input.owner, lifetime: input.lifetime, ack: true });
       const accepted = acknowledged?.data?.ok === true;
+      if (accepted && deliveredConversation && receipt.user?.id && sendingTarget() &&
+          userSendReceipt === witnessedSendReceipt && witnessedSendReceipt?.text === submittedText &&
+          (witnessedSendReceipt.conversationId === target ||
+            (!target && witnessedSendReceipt.conversationId === deliveredConversation)) &&
+          (witnessedSendReceipt.previousMessageId ?? null) === (previousUserId ?? null) &&
+          Date.now() - witnessedSendReceipt.at <= USER_SEND_RECEIPT_MS) {
+        witnessedSendReceipt.accepted = { messageId: receipt.user.id, conversationId: deliveredConversation, epoch };
+      }
       // Stop/composer-clear may precede the exact user row. This receipt, not that early
       // native acceptance, owns retirement of the still-untouched prepared draft. A
       // rejected/cancelled claim, trusted edit, replacement editor or route preserves it.
@@ -10553,8 +10655,11 @@
     }
   }
   function catalogPageReady() {
-    // Passive picker metadata is safe while the model works or a draft exists.
-    return alive && !desktopInputBusy && CLF_DOM.composerVisible();
+    // A catalog covers every native version, not just the selected group's buckets.
+    // Elect an idle composer before inspecting those groups and restoring selection.
+    return alive && !desktopInputBusy && !generating && !CLF_DOM.generating() &&
+      CLF_DOM.composerVisible() && !CLF_DOM.hasComposerAttachments() &&
+      (catalogHelper() || !CLF_DOM.composer()?.textContent?.trim());
   }
   function catalogHelper() {
     return !conversationId && location.pathname === '/' &&
@@ -10575,17 +10680,6 @@
       await waitPageView(catalogPageReady, () => current() && catalogHelper(), 15000);
     }
     if (!current() || !catalogPageReady()) return false;
-    const passiveComposer = CLF_DOM.composer();
-    const passiveCurrent = () => current() && catalogPageReady() && CLF_DOM.composer() === passiveComposer;
-    const visibleModels = await CLF_DOM.inspectVisibleModelSettings?.(passiveCurrent);
-    if (!passiveCurrent()) return false;
-    if (visibleModels) return (await ask({ type: 'model_catalog', nonce: message.nonce, models: visibleModels }))?.ok === true;
-    // Older pickers need UI inspection. Never mutate a working/drafting page.
-    if (generating || CLF_DOM.generating() || CLF_DOM.hasComposerAttachments() ||
-        (!catalogHelper() && CLF_DOM.composer()?.textContent?.trim())) {
-      await ask({ type: 'model_catalog', nonce: message.nonce, models: null, error: 'picker_unavailable' });
-      return false;
-    }
     const restoredText = CLF_DOM.composer().textContent;
     if (catalogHelper() && restoredText?.trim() && !CLF_DOM.clearPromptExact(restoredText)) return false;
     // Work swaps the composer as well as its picker. Complete that owned transition
@@ -10670,7 +10764,7 @@
           generations: genCount,
           queued: queue.length,
           queueBytes,
-          trace: [...trace.values()].slice(-8).reverse(),
+          ...currentRequestStatus(),
           overwrite: RENDER_STREAM === true,
           painted,
           bridge: { connected: status.connected === true, paired: status.paired === true },
@@ -10841,10 +10935,12 @@
   recorderHandle.healthy = () => {
     if (!alive) return false;
     try {
-      return !!globalThis.chrome && !!chrome.runtime && typeof chrome.runtime.id === 'string';
+      if (globalThis.chrome && chrome.runtime && typeof chrome.runtime.id === 'string') return true;
     } catch {
-      return false;
+      // Runtime invalidation can throw instead of clearing id.
     }
+    recorderHandle.stop();
+    return false;
   };
   recorderHandle.stop = () => {
     // `alive` gates sendToWorker(), so this is what actually silences the old recorder:

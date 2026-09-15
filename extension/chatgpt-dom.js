@@ -174,7 +174,19 @@ var CLF_DOM = (() => {
     return safe(() => {
       if (!node) return '';
       if (role === 'user') {
+        // Only blocks that nothing else here already contains. `querySelectorAll` also
+        // returns a match nested inside an earlier match, and `text()` reads a whole
+        // subtree, so an inner block was read twice: once as part of its container and
+        // once on its own. The recorded message then carried that passage twice, and every
+        // reader comparing authored text against what was submitted saw a message longer
+        // than the one it sent. `node` itself never counts as a container: the query cannot
+        // return it, and treating it as one would empty this preferred path.
         const parts = [...node.querySelectorAll('.whitespace-pre-wrap')]
+          .filter((part) => {
+            const outer = part.parentElement && part.parentElement.closest &&
+              part.parentElement.closest('.whitespace-pre-wrap');
+            return !outer || outer === node || !(node.contains && node.contains(outer));
+          })
           .filter(part => !part.hasAttribute?.('data-clf-user-text'))
           .map((part) => text(part))
           .filter(Boolean);
@@ -341,8 +353,11 @@ var CLF_DOM = (() => {
    * carrying the same data-turn-id. Treating each section as a turn makes a five-call
    * request look like several partial requests, so every one fails content.js's
    * one-block-per-call safety check and the page is left with a wall of "Called tool".
-   * Group only sections that explicitly share role + id; id-less sections stay
-   * independent because merging those would be a guess.
+   * Group only consecutive sections that explicitly share role + id. A user question
+   * separates responses even when ChatGPT reuses the same page id. Recording and
+   * presentation must agree on that boundary; otherwise one final descriptor is joined
+   * to both the old and current local generation and loses its completion owner.
+   * Id-less sections stay independent because merging those would be a guess.
    */
   /**
    * What this layer has already read out of a section, kept until the section changes.
@@ -453,40 +468,6 @@ var CLF_DOM = (() => {
   function turns() {
     return safe(() => {
       const out = [];
-      const byKey = new Map();
-      for (const node of document.querySelectorAll(TURN)) {
-        const id = node.getAttribute('data-turn-id');
-        const role = node.getAttribute('data-turn');
-        const key = id ? `${role || ''}:${id}` : null;
-        if (key && byKey.has(key)) {
-          byKey.get(key).nodes.push(node);
-          continue;
-        }
-        const turn = { node, nodes: [node], id, role };
-        out.push(turn);
-        if (key) byKey.set(key, turn);
-      }
-      return out;
-    }, []);
-  }
-
-  /**
-   * Logical turns for presentation only.
-   *
-   * Keep this separate from `turns()`: the recorder has a deliberately conservative model
-   * that other code depends on. The renderer needs one extra guarantee the live ChatGPT DOM
-   * no longer gives it: `data-turn-id` can be reused by later requests. Grouping every
-   * section with the same id across the whole page therefore lets one old id swallow several
-   * different assistant turns and the overwrite renderer hides them all as one block.
-   *
-   * Split sections of one response are adjacent, while a later response is separated by a
-   * user turn. So presentation groups only consecutive sections with the same role + id.
-   * This changes no observation, attribution or recording path; it is only the list the
-   * synthetic stream paints into.
-   */
-  function presentationTurns() {
-    return safe(() => {
-      const out = [];
       let previous = null;
       for (const node of document.querySelectorAll(TURN)) {
         const id = node.getAttribute('data-turn-id');
@@ -501,6 +482,8 @@ var CLF_DOM = (() => {
       return out;
     }, []);
   }
+
+  const presentationTurns = turns;
 
   const turnNodes = (turn) =>
     turn && Array.isArray(turn.nodes) && turn.nodes.length > 0 ? turn.nodes : turn && turn.node ? [turn.node] : [];
@@ -1941,7 +1924,7 @@ var CLF_DOM = (() => {
     });
     const route = /^#settings\/Plugins\/plugin_(asdk_app_[a-zA-Z0-9_-]+)$/.exec(location.hash);
     if (!snapshot || snapshot.appId !== route?.[1] || (expectedAppId ? snapshot.appId !== expectedAppId : snapshot.connectorName !== connectorName) ||
-        !Array.isArray(snapshot.tools) || (snapshot.tools.length < 1 && !externalPlugins) || snapshot.tools.length > (externalPlugins ? 64 : 16) || JSON.stringify(snapshot.tools).length > 300000 ||
+        !Array.isArray(snapshot.tools) || (snapshot.tools.length < 1 && !externalPlugins) || snapshot.tools.length > (externalPlugins ? 257 : 16) || JSON.stringify(snapshot.tools).length > 300000 ||
         snapshot.tools.some(tool => !tool || typeof tool.name !== 'string' || !/^[a-z][a-z0-9_]{0,79}$/.test(tool.name) || typeof tool.description !== 'string' || tool.inputSchema?.type !== 'object') ||
         new Set(snapshot.tools.map(tool => tool.name)).size !== snapshot.tools.length) return null;
     const buttons = [...document.querySelectorAll('button[data-clf-plugin-refresh]')].filter(button => button.getAttribute('data-clf-plugin-refresh') === snapshot.appId && button.getClientRects().length > 0);
@@ -2032,12 +2015,13 @@ var CLF_DOM = (() => {
         const data = event.data;
         if (event.source !== window || event.origin !== location.origin || data?.source !== 'clf-picker-reply' || data.nonce !== nonce || data.v !== 1) return;
         const state = data.picker;
+        const groupId = value => typeof value === 'string' && /^[a-zA-Z0-9._ -]{1,80}$/.test(value) && value.trim() === value && value.trim();
         const valid = state && typeof state.version === 'string' && Number.isInteger(state.currentBucket) &&
           Array.isArray(state.versions) && state.versions.length > 0 && state.versions.length <= 20 &&
-          state.versions.every(v => typeof v.id === 'string' && /^[a-zA-Z0-9._-]{1,80}$/.test(v.id) && typeof v.label === 'string' && v.label.length > 0 && v.label.length <= 80) &&
+          state.versions.every(v => groupId(v.id) && typeof v.label === 'string' && v.label.length > 0 && v.label.length <= 80) &&
           Array.isArray(state.choices) && state.choices.length > 0 && state.choices.length <= 12 &&
           state.choices.every(c => Number.isInteger(c.bucket) && typeof c.id === 'string' && /^[a-zA-Z0-9._-]{1,80}$/.test(c.id) && typeof c.label === 'string' && c.label.length > 0 && c.label.length <= 80 &&
-            typeof c.familyId === 'string' && /^[a-zA-Z0-9._-]{1,80}$/.test(c.familyId) && typeof c.familyLabel === 'string' && c.familyLabel.length > 0 && c.familyLabel.length <= 80 &&
+            groupId(c.familyId) && typeof c.familyLabel === 'string' && c.familyLabel.length > 0 && c.familyLabel.length <= 80 &&
             ['none','minimal','low','medium','high','xhigh','max','ultra','pro'].includes(c.effort) && typeof c.available === 'boolean') &&
           new Set(state.versions.map(v => v.id)).size === state.versions.length && new Set(state.choices.map(c => c.bucket)).size === state.choices.length &&
           state.versions.some(v => v.id === state.version) && state.choices.some(c => c.bucket === state.currentBucket);
@@ -2054,6 +2038,21 @@ var CLF_DOM = (() => {
       .filter(node => !node.closest(`${OWN_SURFACES},[hidden],[aria-hidden="true"],[inert]`) && node.getClientRects().length > 0 &&
         node.id !== 'composer-plus-btn' && node.getAttribute('data-testid') !== 'composer-plus-btn');
     return candidates.length === 1 ? candidates[0] : null;
+  }
+  // Version rows can include a retirement caption below their primary label.
+  // Match the leading label subtree, not the whole row or an arbitrary substring
+  // in its description. Duplicate primary labels still fail closed at the caller.
+  function pickerVersionLabelMatches(row, label) {
+    const text = value => String(value || '').replace(/\s+/g, ' ').trim();
+    const expected = text(label);
+    let node = row;
+    for (let depth = 0; node && depth < 8; depth++) {
+      if (text(node.textContent) === expected) return true;
+      node = [...node.childNodes].find(child => text(child.textContent) &&
+        (child.nodeType === Node.TEXT_NODE || (child.nodeType === Node.ELEMENT_NODE &&
+          !child.matches('svg,[hidden],[aria-hidden="true"],[inert]'))));
+    }
+    return false;
   }
   function modelPickerAccess(stillCurrent) {
     const shown = node => node && !node.closest('[hidden],[aria-hidden="true"],[inert]') && node.getClientRects().length > 0;
@@ -2080,6 +2079,11 @@ var CLF_DOM = (() => {
     return {
       state,
       async open() {
+        // A cold home editor mounts before its native Chat/Work picker. Workers
+        // enter here directly, without the New Chat reuse/catalog preparation.
+        // Wait for that surface, then use the same owned Chat transition before
+        // interpreting account choices. Work's picker is not a denied Chat model.
+        if (!await wait(trigger, 15000) || !await prepareChatModelSurface(stillCurrent)) return null;
         if (!picker()) { const button = await wait(trigger, 15000); if (!key(button, 'Enter') || !await wait(picker)) return null; }
         return state();
       },
@@ -2098,7 +2102,7 @@ var CLF_DOM = (() => {
           toggle[0].click();
         }
         const option = await wait(() => {
-          const rows = versionRows().filter(node => node.textContent.trim() === label && node.getAttribute('aria-disabled') !== 'true');
+          const rows = versionRows().filter(node => pickerVersionLabelMatches(node, label) && node.getAttribute('aria-disabled') !== 'true');
           return rows.length === 1 ? rows[0] : null;
         });
         if (!key(option, 'Enter')) return null;
@@ -2166,15 +2170,6 @@ var CLF_DOM = (() => {
       if (!entry.aliases.includes(choice.id)) entry.aliases.push(choice.id);
       result.set(choice.familyId, entry);
     }
-  }
-  /** Account-evaluated choices already mounted in the closed native picker. */
-  async function inspectVisibleModelSettings(stillCurrent = () => true) {
-    if (!stillCurrent() || !modelPickerTrigger()) return null;
-    const state = await readPickerState();
-    if (!stillCurrent() || !state) return null;
-    const result = new Map();
-    collectModelChoices(result, state);
-    return result.size ? [...result.values()] : null;
   }
   async function inspectModelSettings(stillCurrent = () => true, failure = () => {}) {
     const ui = modelPickerAccess(stillCurrent), original = await ui.open();
@@ -2317,7 +2312,6 @@ var CLF_DOM = (() => {
     projectHomeId,
     enterProject,
     visibleModelSelection,
-    inspectVisibleModelSettings,
     inspectModelSettings,
     uploadImages,
     captureComposerDraft,

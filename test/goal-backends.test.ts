@@ -1,8 +1,9 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { recordLoopMcpProof } from './goal-mcp-proof.js';
 import { GOAL_CONTINUATIONS, GOAL_MARKER_INSTRUCTION, templateGoalDecision } from '../src/shared/goal-templates.js';
 import { promises as fs } from 'node:fs';
-const browser = vi.hoisted(() => ({ request: vi.fn(), authorize: vi.fn() }));
-vi.mock('../src/main/session/input.js', () => ({ requestBrowserDecision: browser.request, authorizeBrowserHelperRetry: browser.authorize, listInputs: async () => [] }));
+const browser = vi.hoisted(() => ({ request: vi.fn(), authorize: vi.fn(), inputs: [] as Array<{ id: string; sessionId: string; finishOwner?: { turnId: string; periodic: boolean } }> }));
+vi.mock('../src/main/session/input.js', () => ({ requestBrowserDecision: browser.request, authorizeBrowserHelperRetry: browser.authorize, listInputs: async () => browser.inputs }));
 vi.mock('electron', () => ({
   app: { getPath: () => '', getVersion: () => '0.0.0' },
   safeStorage: {
@@ -30,6 +31,7 @@ beforeEach(async () => {
   goal.resetGoalStateForTests();
   browser.request.mockReset();
   browser.authorize.mockReset();
+  browser.inputs = [];
   await setSecret('openRouterApiKey', '');
   await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true, backend: 'templates', loopBackend: 'api' } });
   vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('unexpected API request'); }));
@@ -123,6 +125,7 @@ async function recording(conversationId: string, text: string): Promise<string> 
       message: { text: message, chars: message.length, truncated: false }
     });
   }
+  await recordLoopMcpProof(session.id);
   return session.id;
 }
 async function settled(id: string) {
@@ -130,6 +133,30 @@ async function settled(id: string) {
   return goal.goalViewFor(id)!;
 }
 describe('Goal decision backends', () => {
+  it.each(['api', 'chatgpt'] as const)('sends canonical interim and corrections to the %s Loop without a final answer', async backend => {
+    await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true, loopBackend: backend } });
+    await setSecret('openRouterApiKey', 'test-key');
+    const id = `failed-interim-${backend}`;
+    const session = await createSession({ title: 'Failed interim context', conversationId: id });
+    for (const [index, text] of ['Build the individual stage layers', 'Geometry is still shallow', 'Use no textures or color'].entries()) {
+      await appendEvent(session.id, { source: 'extension', time: index + 1,
+        ...(index === 1 ? { kind: 'assistant_message' as const, messageId: 'canonical-interim', state: 'streaming' as const, final: false } : { kind: 'user_message' as const }),
+        message: { text, chars: text.length, truncated: false } });
+    }
+    await appendEvent(session.id, { source: 'extension', kind: 'turn_end', turnId: 'failed-turn', outcome: 'failed', reason: 'thinking_failed', time: 4 });
+    browser.request.mockResolvedValue('{"action":"continue","reply":"Refine the geometry"}');
+    const fetcher = vi.fn(async () => Response.json({ choices: [{ message: { content: '{"action":"continue","reply":"Refine the geometry"}' } }] }));
+    vi.stubGlobal('fetch', fetcher);
+    await goal.setGoalSwitchNow(id, 'loop', true, true);
+    await recordLoopMcpProof(session.id, 'failed-turn');
+    goal.startGoalDraft({ conversationId: id, sessionId: session.id, turnId: 'failed-turn' });
+    expect((await settled(id)).stage).toBe('ready');
+    if (backend === 'chatgpt') expect(browser.request.mock.calls[0]?.[2]).toMatchObject({ lifetime: 'temporary-planner', conversationId: null });
+    const payload = backend === 'chatgpt' ? browser.request.mock.calls[0]?.[0]
+      : String((fetcher.mock.calls[0] as unknown as [unknown, RequestInit])?.[1]?.body);
+    for (const text of ['Build the individual stage layers', 'Geometry is still shallow', 'Use no textures or color']) expect(payload).toContain(text);
+    expect(payload.match(/Geometry is still shallow/g)).toHaveLength(1);
+  });
   it('restarts only the deliberately authorized failed source helper', async () => {
     await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true, backend: 'chatgpt' } });
     const id = 'source-retry-helper';
@@ -146,7 +173,7 @@ describe('Goal decision backends', () => {
     expect(await settled(id)).toMatchObject({ turnId: 'source-final', stage: 'ready' });
     expect(browser.request).toHaveBeenCalledTimes(2);
   });
-  it('reuses its durable helper with only proven incremental source messages after restart', async () => {
+  it('uses fresh temporary helpers with full reference after restart and never revives historical helpers', async () => {
     const config = defaultConfig();
     await saveConfig({ ...config, goal: { ...config.goal, enabled: true, backend: 'chatgpt' } });
     const id = 'incremental-source';
@@ -157,7 +184,7 @@ describe('Goal decision backends', () => {
     });
     goal.startGoalDraft({ conversationId: id, sessionId, turnId: 'first' });
     expect((await settled(id)).stage).toBe('ready');
-    expect(browser.request.mock.calls[0]?.[2]).toEqual({ sourceSessionId: sessionId, conversationId: null, model: 'gpt-5.6-sol', reasoningEffort: 'high', publish: expect.any(Function) });
+    expect(browser.request.mock.calls[0]?.[2]).toEqual({ sourceSessionId: sessionId, conversationId: null, lifetime: 'temporary-planner', model: 'gpt-5.6-sol', reasoningEffort: 'high', publish: expect.any(Function) });
     expect(browser.request.mock.calls[0]?.[0]).toContain('Original reference only');
     const saved = goal.snapshotGoalSwitches();
     goal.resetGoalStateForTests();
@@ -166,17 +193,61 @@ describe('Goal decision backends', () => {
       message: { text: 'New response only', chars: 17, truncated: false } });
     goal.startGoalDraft({ conversationId: id, sessionId, turnId: 'second' });
     expect((await settled(id)).stage).toBe('ready');
-    expect(browser.request.mock.calls[1]?.[2]).toMatchObject({ conversationId: 'incremental-helper', sourceSessionId: sessionId });
+    expect(browser.request.mock.calls[1]?.[2]).toMatchObject({ conversationId: null, lifetime: 'temporary-planner', sourceSessionId: sessionId });
     expect(browser.request.mock.calls[1]?.[0]).toContain('New response only');
-    expect(browser.request.mock.calls[1]?.[0]).not.toContain('Original reference only');
-    expect(browser.request.mock.calls[1]?.[0]).toContain('Append these new source messages');
+    expect(browser.request.mock.calls[1]?.[0]).toContain('Original reference only');
+    expect(browser.request.mock.calls[1]?.[0]).not.toContain('Append these new source messages');
     await saveConfig({ ...config, goal: { ...config.goal, enabled: true, backend: 'chatgpt', prompt: 'Changed continuation instructions' } });
     goal.startGoalDraft({ conversationId: id, sessionId, turnId: 'third' });
     expect((await settled(id)).stage).toBe('ready');
     expect(browser.request.mock.calls[2]?.[0]).toContain('Original reference only');
-    expect(browser.request.mock.calls[2]?.[2]).toMatchObject({ conversationId: 'incremental-helper' });
+    expect(browser.request.mock.calls[2]?.[2]).toMatchObject({ conversationId: null, lifetime: 'temporary-planner' });
     expect(fetch).not.toHaveBeenCalled();
   });
+  it('bounds the complete browser envelope while keeping a large original brief and newest result', async () => {
+    await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true, backend: 'chatgpt' } });
+    const id = 'bounded-browser';
+    const session = await createSession({ title: 'bounded', conversationId: id });
+    const original = 'Build the whole requested product. ' + 'requirement '.repeat(2000) + ' KEEP THIS ORIGINAL END';
+    await appendEvent(session.id, { source: 'extension', kind: 'user_message', time: 1000,
+      message: { text: original, chars: original.length, truncated: false } });
+    for (let index = 0; index < 12; index++) {
+      const text = `result ${index}: ` + '"\\\n'.repeat(3000);
+      await appendEvent(session.id, { source: 'extension', kind: 'assistant_message', final: true, time: 2000 + index,
+        message: { text, chars: text.length, truncated: false } });
+    }
+    const correction = 'LATEST USER CORRECTION ' + 'y'.repeat(47_000);
+    await appendEvent(session.id, { source: 'extension', kind: 'user_message', time: 3000,
+      message: { text: correction, chars: correction.length, truncated: false } });
+    browser.request.mockResolvedValue('{"action":"continue","reply":"Continue the full implementation"}');
+    goal.startGoalDraft({ conversationId: id, sessionId: session.id, turnId: 'bounded' });
+    expect((await settled(id)).stage).toBe('ready');
+    const prompt = browser.request.mock.calls[0]?.[0] as string;
+    expect(prompt.length).toBeLessThanOrEqual(96_000);
+    expect(prompt).toContain(original);
+    expect(prompt).toContain('result 11');
+    expect(prompt).toContain('LATEST USER CORRECTION');
+    expect(prompt).toContain('omitted');
+  });
+
+  it('labels only exact same-session automatic inputs without treating manual input as automation', async () => {
+    const session = await createSession({ title: 'provenance', conversationId: 'reference-provenance' });
+    browser.inputs = [
+      { id: 'automatic', sessionId: session.id, finishOwner: { turnId: 'turn', periodic: false } },
+      { id: 'manual', sessionId: session.id },
+      { id: 'other-session', sessionId: 'different', finishOwner: { turnId: 'turn', periodic: false } }
+    ];
+    for (const [index, inputId] of ['manual', 'automatic', 'other-session'].entries()) {
+      await appendEvent(session.id, { source: 'app', kind: 'user_message', inputId, time: 1000 + index,
+        message: { text: 'finish the same broad task', chars: 26, truncated: false } });
+    }
+    const messages = await goal.conversationMessages(session.id);
+    expect(messages[0]).toEqual({ role: 'user', content: 'finish the same broad task' });
+    expect(messages[1]).toMatchObject({ role: 'user', origin: 'automatic' });
+    expect(messages[1]?.content).toContain('not a new human requirement');
+    expect(messages[2]).toEqual({ role: 'user', content: 'finish the same broad task' });
+  });
+
   it('requires an API key for API finish follow-ups', async () => {
     const backend = 'api';
     await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, backend: 'templates', loopBackend: backend } });
@@ -194,7 +265,10 @@ describe('Goal decision backends', () => {
       const body = JSON.parse(String(init.body));
       expect(body.reasoning).toEqual({ effort: 'high', exclude: true });
       expect(body.messages[0].content).toBe('Keep advancing my loop request.');
-      expect(body.messages.some((message: { content: string }) => message.content === 'Finish the original task')).toBe(true);
+      const reference = body.messages.find((message: { role: string }) => message.role === 'user').content;
+      expect(body.messages.some((message: { role: string }) => message.role === 'assistant')).toBe(false);
+      expect(reference).toContain('role alone does not prove human authorship');
+      expect(JSON.parse(reference.slice(reference.indexOf('\n\n') + 2))).toContainEqual({ role: 'user', content: 'Finish the original task' });
       expect(JSON.stringify(body.messages)).toContain('Actual interim checks are running');
       return Response.json({ choices: [{ message: { content: '{"action":"continue","reply":"Finish the tests"}' } }] });
     });
@@ -232,6 +306,59 @@ describe('Goal decision backends', () => {
     expect(browser.request.mock.calls[0]?.[0]).toContain('Continue the loop request.');
     expect(browser.request.mock.calls[0]?.[0]).toContain('Finish my exact objective');
   });
+  it.each(['api', 'chatgpt'] as const)('keeps the saved Loop task intact on every %s decision after history eviction', async backend => {
+    const config = defaultConfig();
+    await saveConfig({ ...config, goal: { ...config.goal, enabled: true, mode: 'loop', loopBackend: backend,
+      includeToolCalls: true, loopPrompt: 'SYSTEM LOOP POLICY' } });
+    await setSecret('openRouterApiKey', 'test-key');
+    const conversationId = `saved-loop-task-${backend}`;
+    const sessionId = await recording(conversationId, 'Initial answer');
+    // This comes from Save task, not from an assistant summary or the reference-history tail.
+    const task = 'SAVED TASK START\n' + 'Preserve the whole requested product. '.repeat(150) + '\nSAVED TASK END';
+    await goal.setGoalObjectiveNow(conversationId, task);
+    for (let index = 0; index < 245; index++) {
+      const text = `Earlier result ${index}: ` + 'completed work '.repeat(80);
+      await appendEvent(sessionId, { source: 'extension', kind: 'assistant_message', final: true, time: 3000 + index,
+        message: { text, chars: text.length, truncated: false } });
+    }
+    const requests: string[] = [];
+    browser.request.mockImplementation(async (prompt: string) => {
+      requests.push(prompt);
+      return '{"action":"continue","reply":"Continue the requested product"}';
+    });
+    vi.stubGlobal('fetch', vi.fn(async (_url: unknown, init: RequestInit) => {
+      const body = JSON.parse(String(init.body));
+      requests.push(body.messages.map((message: { content: string }) => message.content).join('\n'));
+      return Response.json({ choices: [{ message: { content: '{"action":"continue","reply":"Continue the requested product"}' } }] });
+    }));
+    for (let round = 0; round < 2; round++) {
+      const turnId = `saved-task-round-${round}`;
+      await recordLoopMcpProof(sessionId, turnId);
+      for (const [kind, text] of [
+        ['user_message', `LATEST HUMAN CORRECTION ${round}`],
+        ['assistant_message', `LATEST INTERIM ${round}`],
+        ['assistant_message', `LATEST FINAL ${round}`]
+      ] as const) {
+        await appendEvent(sessionId, { source: 'extension', time: Date.now(), turnId,
+          ...(kind === 'assistant_message' ? { kind, messageId: text, final: text.includes('FINAL') } : { kind }),
+          message: { text, chars: text.length, truncated: false } });
+      }
+      goal.startGoalDraft({ conversationId, sessionId, turnId });
+      expect((await settled(conversationId)).stage).toBe('ready');
+      expect(await goal.draftFastFollowup(sessionId)).toBe('Continue the requested product');
+      for (const prompt of requests.slice(round * 2)) {
+        expect(prompt).toContain(task);
+        expect(prompt).toContain('SYSTEM LOOP POLICY');
+        expect(prompt).toContain('Finish the original task');
+        expect(prompt).toContain(`LATEST HUMAN CORRECTION ${round}`);
+        expect(prompt).toContain(`LATEST INTERIM ${round}`);
+        expect(prompt).toContain(`LATEST FINAL ${round}`);
+        expect(prompt).not.toContain('[Recorded tool');
+      }
+    }
+    expect(requests).toHaveLength(4);
+  });
+
   it('keeps periodic Goal checks on their own backend and completion contract', async () => {
     await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, backend: 'templates', loopBackend: 'chatgpt' } });
     const sessionId = await recording('periodic-offline', 'Done\n[[COS_GOAL:COMPLETE]]');
@@ -316,23 +443,28 @@ describe('Goal decision backends', () => {
   });
 });
 
-it('retires an unretryable helper pickup durably without retiring a newer final', async () => {
+it.each(['goal_browser_send_failed', 'goal_browser_send_unconfirmed'])('preserves source debt after %s without automatic transport retry', async failure => {
   await saveConfig({ ...defaultConfig(), goal: { ...defaultConfig().goal, enabled: true, backend: 'chatgpt' } });
   const id = 'failed-helper-pickup';
   await goal.setGoalSwitchNow(id, 'goal', true);
   const sessionId = await recording(id, 'Next task');
   await goal.acceptGoalReplyNow({ conversationId: id, sessionId, replyId: 'reply-one', turnId: 'turn-one', eventSeq: 10, blocked: false });
   expect(goal.goalPendingReplyFor(id)?.turnId).toBe('turn-one');
-  browser.request.mockRejectedValueOnce(new Error('goal_browser_send_failed'));
+  browser.request.mockRejectedValueOnce(new Error(failure));
   goal.startGoalDraft({ conversationId: id, sessionId, turnId: 'turn-one' });
   expect(await settled(id)).toMatchObject({ stage: 'failed', retryable: false });
-  expect(goal.goalPendingReplyFor(id)).toBeNull();
-  expect(goal.pendingGoalReplies().some(row => row.conversationId === id)).toBe(false);
+  expect(goal.goalPendingReplyFor(id)?.turnId).toBe('turn-one');
+  expect(goal.goalDraftNeedsIntervention(id)).toBe(true);
+  const failed = goal.goalViewFor(id)!;
+  await goal.ackGoalDraftNow(id, failed.token);
+  expect(goal.startGoalDraft({ conversationId: id, sessionId, turnId: 'turn-one' }).token).toBe(failed.token);
+  expect(browser.request).toHaveBeenCalledTimes(1);
   await flushDurable();
   const stored = await readDurable<any>(goal.GOAL_REPLIES_STATE);
-  expect(stored.replies.find((row: any) => row.conversationId === id).state).toBe('handled');
+  expect(stored.replies.find((row: any) => row.conversationId === id).state).toBe('pending');
   await goal.acceptGoalReplyNow({ conversationId: id, sessionId, replyId: 'reply-two', turnId: 'turn-two', eventSeq: 11, blocked: false });
   expect(goal.goalPendingReplyFor(id)?.turnId).toBe('turn-two');
+  expect(goal.goalDraftNeedsIntervention(id)).toBe(false);
 });
 
 it('generates a validated staged plan through the existing browser helper without an API key', async () => {
@@ -340,6 +472,9 @@ it('generates a validated staged plan through the existing browser helper withou
   expect(await goal.draftTaskPlan('Build the feature and test it', 'chatgpt')).toEqual(['Implement the requested feature', 'Test every acceptance criterion']);
   expect(browser.request).toHaveBeenCalledTimes(1);
   expect(browser.request.mock.calls[0]![0]).toContain('Build the feature and test it');
+  expect(browser.request.mock.calls[0]![2]).toMatchObject({ lifetime: 'temporary-planner', conversationId: null });
+  expect(browser.request.mock.calls[0]![0]).toContain('Produce the requested staged workflow');
+  expect(browser.request.mock.calls[0]![0]).not.toContain('You only write the next prompt');
   expect(browser.request.mock.calls[0]![0]).not.toMatch(/session_finish|minutes before/i);
   browser.request.mockResolvedValueOnce(JSON.stringify({ action: 'continue', reply: '{"stages":[""]}' }));
   await expect(goal.draftTaskPlan('Build it', 'chatgpt')).rejects.toThrow('invalid stages');

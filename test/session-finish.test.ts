@@ -6,6 +6,7 @@ import { TaskRequestError } from '../src/main/task-request.js';
 const hooks = vi.hoisted(() => ({ caller: { sessionId: '', conversationId: '' }, startedAt: 2000, followup: vi.fn(), enqueue: vi.fn(), hasInput: true, delivered: [] as Array<{ id: string; sessionId: string; text: string; state: string }>, inputListeners: new Set<() => void>() }));
 vi.mock('../src/main/session/input.js', () => ({
   hasEligibleToolInput: async () => hooks.hasInput,
+  finishNeedsBrowserInput: async () => false,
   listInputs: async () => hooks.delivered,
   enqueueInput: hooks.enqueue,
   onInputChange: (listener: () => void) => { hooks.inputListeners.add(listener); return () => hooks.inputListeners.delete(listener); }
@@ -17,7 +18,7 @@ vi.mock('../src/main/mcp/call-context.js', async (importOriginal) => ({
 const { defaultConfig, initConfigPath, saveConfig } = await import('../src/main/config.js');
 const { initSessionStore, createSession, getSession, rebindSession, appendEvent, readRecentEvents, flushSessions, resetSessionStoreForTests, observeSessionModel } = await import('../src/main/session/store.js');
 const { resetRecorderForTests } = await import('../src/main/session/recorder.js');
-const { announceSessionFinish: announceTransport, settleSessionFinishForTests, requestSessionFinishGoal, sessionFinishWaiting, setFinishNotifier, releaseSessionFinish, sessionFinishHeld } = await import('../src/main/session/finish.js');
+const { announceSessionFinish: announceTransport, sessionFinishDeadline, settleSessionFinishForTests, requestSessionFinishGoal, sessionFinishWaiting, setFinishNotifier, releaseSessionFinish, sessionFinishHeld } = await import('../src/main/session/finish.js');
 const { makeTempDir, removeTempDir } = await import('./helpers.js');
 async function announceSessionFinish(sessionId: string, summary: string): Promise<string> {
   const result = await announceTransport(sessionId, summary);
@@ -52,6 +53,25 @@ afterEach(() => {
 });
 afterAll(async () => { setFinishNotifier(null); resetSessionStoreForTests(); await removeTempDir(directory); });
 describe('session finish turn identity', () => {
+  it('spends only the remaining ingress budget after late identity resolution', async () => {
+    hooks.hasInput = false;
+    let complete!: (text: string) => void;
+    hooks.followup.mockImplementationOnce(() => new Promise<string>(resolve => { complete = resolve; }));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const ingress = Date.now() - 24_000;
+    let settled = false;
+    const call = announceTransport(sessionId, 'Ready', sessionFinishDeadline(ingress)).then(value => { settled = true; return value; });
+    try {
+      await vi.waitFor(() => expect(hooks.followup).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(settled).toBe(true);
+      expect(await call).toContain('HELD:');
+    } finally {
+      complete('Continue verification');
+      await settleSessionFinishForTests();
+      vi.useRealTimers();
+    }
+  });
   it('keeps one Goal operation through transient retries and queues its eventual result once', async () => {
     let fail!: (error: Error) => void;
     hooks.followup.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
@@ -316,7 +336,7 @@ describe('session finish turn identity', () => {
     expect(identities.has('finish:turn-one')).toBe(false);
     expect([...identities].filter(id => id?.startsWith('finish-goal:turn-one:'))).toHaveLength(1);
   });
-  it('ignores its own empty wait output but reconsiders real tool results and delivered app input', async () => {
+  it('does not repeat for tool-only work even with legacy opt-in, but reconsiders delivered app input', async () => {
     const recordTool = (tool: string, result: string) => appendEvent(sessionId, {
       source: 'mcp', kind: 'tool_call', turnId: 'turn-one', time: 2200,
       call: { callId: randomUUID(), tool, attribution: 'request_id', requestId: 'same-server-turn', conversationId: hooks.caller.conversationId,
@@ -330,13 +350,13 @@ describe('session finish turn identity', () => {
     expect(hooks.followup).toHaveBeenCalledTimes(1);
     await recordTool('exec_command', 'The validation exposed a missing requirement');
     await announceSessionFinish(sessionId, 'Real tool output');
-    expect(hooks.followup).toHaveBeenCalledTimes(2);
+    expect(hooks.followup).toHaveBeenCalledTimes(1);
     hooks.delivered.push({ id: 'new-instruction', sessionId, text: 'Also cover the image workflow', state: 'tool' });
     await announceSessionFinish(sessionId, 'New app instruction');
-    expect(hooks.followup).toHaveBeenCalledTimes(2); // Undelivered user input goes first.
+    expect(hooks.followup).toHaveBeenCalledTimes(1); // Undelivered user input goes first.
     hooks.delivered[0]!.state = 'sent';
     await announceSessionFinish(sessionId, 'ACK alone');
-    expect(hooks.followup).toHaveBeenCalledTimes(3);
+    expect(hooks.followup).toHaveBeenCalledTimes(2);
     expect(notify).not.toHaveBeenCalled();
   });
   it('reconsiders new authored progress once while preserving the notification receipt', async () => {

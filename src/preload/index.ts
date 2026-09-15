@@ -1,4 +1,7 @@
 import type { ChatModelCatalog } from '../shared/chat-models.js';
+import type { SkillLibrary } from '../shared/skills.js';
+import type { ChatgptPermissionNotice } from '../shared/chatgpt-permission-notice.js';
+import type { GoalModel } from '../shared/goal-reasoning.js';
 import type { TaskProgress } from '../shared/task-progress.js';
 import type { BrowserPreferences } from '../shared/browser-preferences.js';
 import type { SessionControlsView } from '../main/bridge.js';
@@ -45,8 +48,9 @@ export interface SettingsPatch {
 
 /** One page of the model catalogue, as the model picker asks for it. */
 export interface GoalModelPage {
-  models: Array<{ id: string; name: string; created: number; contextLength: number }>;
+  models: GoalModel[];
   total: number;
+  selectedModel?: GoalModel;
 }
 
 export interface SessionList {
@@ -74,6 +78,10 @@ export interface SessionDetail {
 }
 
 const api = {
+  skillsList: () => call<SkillLibrary>('skills:list'),
+  skillsImport: () => call<SkillLibrary | null>('skills:import'),
+  skillsOpenFolder: () => call<void>('skills:openFolder'),
+  skillsRemove: (id: string) => call<SkillLibrary>('skills:remove', { id }),
   openLegalNotices: () => call<void>('plugins:legalNotices'),
   pluginsSnapshot: () => call<PluginSnapshot>('plugins:snapshot'),
   pluginsInstall: (request: PluginInstallRequest) => call<PluginSnapshot>('plugins:install', request),
@@ -113,7 +121,10 @@ const api = {
   addRootPath: (file: File) => call<AppState>('roots:addPath', { path: webUtils.getPathForFile(file) }),
   removeRoot: (name: string) => call<AppState>('roots:remove', { name }),
   renameRoot: (name: string, newName: string) => call<AppState>('roots:rename', { name, newName }),
-  setApiKey: (value: string) => call<AppState>('secret:set', { value }),
+  setApiKey: (value: string, profileId?: string) => call<AppState>('secret:set', { value, ...(profileId ? { profileId } : {}) }),
+  addSetupProfile: (name: string) => call<AppState>('setup:profile', { action: 'add', name }),
+  selectSetupProfile: (id: string) => call<AppState>('setup:profile', { action: 'select', id }),
+  removeSetupProfile: (id: string) => call<AppState>('setup:profile', { action: 'remove', id }),
   // The goal loop's own credential. Same channel, named slot; the value only ever goes in.
   setGoalKey: (value: string) => call<AppState>('secret:set', { value, key: 'openRouterApiKey' }),
   // The same, for a custom provider endpoint. Optional: keyless local servers need nothing stored.
@@ -148,6 +159,13 @@ const api = {
   releaseSessionFinish: (id: string, expectedTurnId: string) => call<SessionControlsView>('sessions:releaseFinish', { id, expectedTurnId }),
   generateFinishGoal: (id: string, expectedTurnId: string) => call<string>('sessions:generateFinishGoal', { id, expectedTurnId }),
   getChatModels: () => call<ChatModelCatalog>('chatModels:get'),
+  getChatgptPermissionNotice: () => call<ChatgptPermissionNotice>('chatgptPermissionNotice:get'),
+  acknowledgeChatgptPermissionNotice: () => call<ChatgptPermissionNotice>('chatgptPermissionNotice:ack'),
+  onChatgptPermissionNotice: (listener: (notice: ChatgptPermissionNotice) => void): (() => void) => {
+    const wrapped = (_event: unknown, notice: ChatgptPermissionNotice): void => listener(notice);
+    ipcRenderer.on('chatgptPermissionNotice:changed', wrapped);
+    return () => ipcRenderer.removeListener('chatgptPermissionNotice:changed', wrapped);
+  },
   browserPreferences: (patch: Partial<BrowserPreferences> = {}) => call<BrowserPreferences>('browser:preferences', patch),
   requestChatModels: () => call<ChatModelCatalog>('chatModels:request'),
   onChatModelsChanged: (listener: (catalog: ChatModelCatalog) => void): (() => void) => {
@@ -169,7 +187,7 @@ const api = {
   editQueuedInput: (id: string, text: string, afterTurn?: boolean) => call<boolean>('sessions:editInput', { id, text, afterTurn }),
   reorderQueuedInputs: (sessionId: string, ids: string[]) => call<boolean>('sessions:reorderInputs', { sessionId, ids }),
   cancelInput: (id: string) => call<boolean>('sessions:cancelInput', { id }),
-  setInputAutomation: (id: string, mode: 'off' | 'goal' | 'loop') => call<boolean>('sessions:inputAutomation', { id, mode }),
+  setInputAutomation: (id: string, mode: 'off' | 'goal' | 'loop', loopAfterTurn?: boolean) => call<boolean>('sessions:inputAutomation', { id, mode, loopAfterTurn }),
   setZoom: (factor: number) => call<number>('window:zoom', { factor }),
   getZoom: () => call<number>('window:getZoom'),
   openSessionChat: (id: string) => call<boolean>('sessions:openChat', { id }),

@@ -1,4 +1,4 @@
-import { offerToolInput, acknowledgeToolInput, TOOL_INPUT_HEADER } from '../session/input.js';
+import { offerToolInput, acknowledgeToolInput, TOOL_INPUT_HEADER, type ToolInputBatch } from '../session/input.js';
 import { pluginManager } from '../plugins/manager.js';
 import { WINDOWS_COMPUTER_STATE_INPUT_METHODS } from '../../shared/windows-computer.js';
 /**
@@ -27,23 +27,27 @@ import { beginToolTiming, inboundRequestId, inboundPublication } from './inbound
 import { McpServer, type ServerContext } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { Capabilities, Root } from '../../shared/types.js';
+import { CAPABILITY_LABELS, WRITE_CAPABILITIES } from '../../shared/types.js';
 import { FsOpError, formatBytes, type FileInfo } from '../fsops.js';
 import { logInfo, logWarn } from '../logger.js';
 import { toolSchema } from './tool-declarations.js';
 import {
   SandboxError,
   isAbsoluteVirtualPath,
+  isContained,
   isNativeWindowsPath,
   resolvePath,
   type Resolved
 } from '../sandbox.js';
 import { currentWorkspace, learnWorkspace, setCurrentWorkspace } from '../workspace.js';
+import { skillsDirectory } from '../skills.js';
 import { getSessionProject } from '../projects.js';
 import { ExecError } from '../exec.js';
 import { ComputerError } from '../computer/index.js';
 import { getConfig } from '../config.js';
 import {
   AgentError,
+  IdentityLostError,
   currentRunId,
   acknowledgeOffersForConversation,
   dormantWorkerNotice,
@@ -89,6 +93,7 @@ import { acknowledgeBackgroundExecOutput, backgroundExecRecoveryNotices, offerBa
 import { DEFAULT_MAX_OUTPUT_TOKENS } from '../codex/unified-exec-constants.js';
 import { unattributedRepairEta } from '../bridge.js';
 import { conversationAttachment, readOverflowText } from '../session/store.js';
+import { sessionFinishDeadline } from '../session/finish.js';
 import type { StoredText, ToolOutcome } from '../../shared/session.js';
 
 export interface ToolContext {
@@ -140,6 +145,62 @@ export type ToolResult = { content: ToolContent[]; structuredContent?: Record<st
 export const ok = (text: string): ToolResult => ({ content: [{ type: 'text', text }] });
 export const fail = (text: string): ToolResult => ({ content: [{ type: 'text', text }], isError: true });
 
+// Typed local refusals only: arbitrary tool/plugin text cannot arm a recovery notice.
+const identityRefusals = new WeakSet<ToolResult>();
+export function failIdentity(text: string): ToolResult {
+  const result = fail(text);
+  identityRefusals.add(result);
+  return result;
+}
+
+// Advisory, process-local history; never ownership or permission. Exact correlation
+// remains the only join, including when late proof belongs to an earlier request.
+const identityRecovery = new Map<string, { tools: Set<string>; offer?: CallContext['publication'] }>();
+const MAX_IDENTITY_RECOVERY = 2_000;
+
+function rememberIdentityRefusal(requestId: string | null, tool: string): void {
+  if (!requestId) return;
+  const previous = identityRecovery.get(requestId);
+  const pending = previous && !previous.offer ? previous : { tools: new Set<string>() };
+  if (pending.tools.size < 8) pending.tools.add(tool.slice(0, 100));
+  identityRecovery.delete(requestId);
+  identityRecovery.set(requestId, pending);
+  if (identityRecovery.size > MAX_IDENTITY_RECOVERY) identityRecovery.delete(identityRecovery.keys().next().value!);
+}
+
+async function withIdentityRecoveredNotice(context: CallContext, result: ToolResult): Promise<ToolResult> {
+  const { caller, publication } = context;
+  if (!identityRecovery.size || !publication || !caller.conversationId || !caller.sessionId) return result;
+  const exact = requestCorrelation(caller.requestId);
+  if (exact?.conversationId !== caller.conversationId || exact.sessionId !== caller.sessionId) return result;
+  if (await conversationAttachment(caller.conversationId, caller.sessionId) !== 'current') return result;
+  // Recheck live restrictions after the await, including identity learned during a handler.
+  if (isChatBlocked(caller.conversationId) || compactingConversation(caller.conversationId) ||
+      retiredWorkerForConversation(caller.conversationId) || dormantWorkerNotice(caller.conversationId) ||
+      endedWorkerNotice(caller.conversationId)) return result;
+  const pending: Array<{ tools: Set<string>; offer?: CallContext['publication'] }> = [];
+  for (const [requestId, entry] of identityRecovery) {
+    if (entry.offer && !entry.offer.failed) {
+      if (entry.offer.completedAt !== null) identityRecovery.delete(requestId);
+      continue;
+    }
+    const owner = requestCorrelation(requestId);
+    if (owner?.conversationId === caller.conversationId && owner.sessionId === caller.sessionId) pending.push(entry);
+  }
+  if (!pending.length) return result;
+  const tools = [...new Set(pending.flatMap(entry => [...entry.tools]))].slice(0, 8).join(', ');
+  const text = '\n--- Identity recovered ---\n' +
+    `Your request is now matched to this ChatGPT conversation. Earlier ${tools} calls were refused because chat identity was missing. ` +
+    'You can now retry any still-needed operation that was not performed because of that refusal. ' +
+    'Do not repeat completed operations. Other permissions and lifecycle restrictions still apply.';
+  const used = result.content.reduce((bytes, part) => bytes + (part.type === 'text' ? Buffer.byteLength(part.text, 'utf8') : 0), 0);
+  if (used + Buffer.byteLength(text, 'utf8') > DEFAULT_MAX_OUTPUT_TOKENS * 4) return result;
+  // Reserve synchronously across parallel outer results. A failed local publication
+  // can re-offer; successful publication suppresses repetition, not proof of comprehension.
+  for (const entry of pending) entry.offer = publication;
+  return { ...result, content: [...result.content, { type: 'text', text }] };
+}
+
 /** Maps runtime errors to short model-facing text without ever exposing real paths. */
 export function friendlyError(err: unknown): string {
   if (err instanceof SandboxError || err instanceof ComputerError) return err.message;
@@ -180,6 +241,7 @@ export function lastToolCallAt(surface?: SurfaceId): number | null {
 
 /** Cleared with the server, so the answer is always about the current session. */
 export function resetToolClock(): void {
+  identityRecovery.clear();
   toolCallSeenAt = null;
   surfaceToolCallAt.clear();
   transportIdentity = { checked: false, present: false };
@@ -228,7 +290,7 @@ export async function guard(name: string, fn: () => Promise<ToolResult>): Promis
       noteOutcomeSafely('tool_internal_error');
       logWarn(`tool ${name} failed in ${elapsed} ms: ${message}`);
     }
-    return fail(message);
+    return err instanceof IdentityLostError ? failIdentity(message) : fail(message);
   }
 }
 
@@ -357,10 +419,11 @@ async function withBackgroundExecRecovery(
  */
 function withUnattributedNotice(
   conversationId: string | null | undefined,
-  result: ToolResult
+  result: ToolResult,
+  requestId: string | null
 ): ToolResult {
   if (conversationId) return result;
-  const eta = unattributedRepairEta();
+  const eta = unattributedRepairEta(Date.now(), requestId);
   if (eta === null) return result;
   return {
     ...result,
@@ -514,16 +577,21 @@ async function dispatchTracked(
   // mate while a swarm is active. Use the full exact-id window, not the shorter prime window:
   // the live worker failure that motivated IDENTITY_EVIDENCE_MS arrived ~8 seconds late.
   const identitySensitive = needsWorkspaceIdentity(name, args);
-  // update_plan always consumes this exact session, even outside a swarm. Resolve it
+  // update_plan and session_finish consume this exact session, even outside a swarm. Resolve it
   // before the shared blocked/superseded checks rather than guessing from selection.
   // Observation and its dependent input must resolve the same caller before either
   // handler runs. Recording a late identity cannot recover a discarded anonymous frame.
   const desktopContext = surface === 'desktop' && (name === 'get_window_state' ||
     (WINDOWS_COMPUTER_STATE_INPUT_METHODS as readonly string[]).includes(name));
-  if (!context.caller.conversationId && (desktopContext || name === 'exec' || name === 'update_plan' || (identitySensitive && swarmRunning())) && requestId) {
+  // Identity and the finish hold share one ingress deadline; late proof must not
+  // add another complete hold interval to an already waiting provider request.
+  const finishDeadline = name === 'session_finish' ? sessionFinishDeadline(startedAt) : null;
+  const identityWindow = (requested: number): number => finishDeadline === null
+    ? requested : Math.min(requested, Math.max(0, finishDeadline - Date.now()));
+  if (!context.caller.conversationId && (desktopContext || name === 'exec' || name === 'update_plan' || name === 'session_finish' || (identitySensitive && swarmRunning())) && requestId) {
     setCallerConversation(
       context,
-      await awaitFreshCallOrigin(name, startedAt, IDENTITY_EVIDENCE_MS, { requestId })
+      await awaitFreshCallOrigin(name, startedAt, identityWindow(name === 'session_finish' ? SPAWN_EVIDENCE_MS : IDENTITY_EVIDENCE_MS), { requestId })
     );
   }
   // A run that ended leaves an explicit short-lived lease tombstone for each open worker
@@ -532,7 +600,7 @@ async function dispatchTracked(
   if (!context.caller.conversationId && hasRetiredWorkerLeases() && requestId) {
     setCallerConversation(
       context,
-      await awaitFreshCallOrigin(name, startedAt, IDENTITY_EVIDENCE_MS, { requestId })
+      await awaitFreshCallOrigin(name, startedAt, identityWindow(IDENTITY_EVIDENCE_MS), { requestId })
     );
   }
   // Dormant histories are long-lived identity fences, not active slot claims. An old worker tab
@@ -543,7 +611,7 @@ async function dispatchTracked(
   if (!context.caller.conversationId && hasDormantWorkerLeases() && requestId) {
     setCallerConversation(
       context,
-      await awaitFreshCallOrigin(name, startedAt, IDENTITY_EVIDENCE_MS, { requestId })
+      await awaitFreshCallOrigin(name, startedAt, identityWindow(IDENTITY_EVIDENCE_MS), { requestId })
     );
   }
   // And the user's own block, which needs identity resolved to the same depth as everything
@@ -568,7 +636,7 @@ async function dispatchTracked(
   if (!context.caller.conversationId && (anyChatBlocked() || anyContinuationOpen()) && requestId) {
     setCallerConversation(
       context,
-      await awaitFreshCallOrigin(name, startedAt, REQUEST_ID_GRACE_MS, { requestId })
+      await awaitFreshCallOrigin(name, startedAt, identityWindow(REQUEST_ID_GRACE_MS), { requestId })
     );
   }
   const supersededConversation = context.caller.conversationId
@@ -710,19 +778,19 @@ async function dispatchTracked(
         ? Promise.resolve(fail(endedWorker))
         : retiredLeaseAmbiguous
         ? Promise.resolve(
-            fail(
+            failIdentity(
               'CALLER_IDENTITY_REQUIRED: a recently retired worker tab may still be open, and the connector could not prove this call belongs to a different chat. No local tool was run. For a browser chat, restore the companion connection and retry. Scheduled or headless runs may have no browser identity: the user can enable "Allow unattributed calls" in the app settings to permit self-contained calls recorded as Unattributed. Exact retired-worker restrictions still apply.'
             )
           )
         : dormantLeaseAmbiguous
         ? Promise.resolve(
-            fail(
+            failIdentity(
               'CALLER_IDENTITY_REQUIRED: a dormant worker chat still belongs to its prime history, and the connector could not prove this call belongs to a different conversation. No local tool was run. For a browser chat, restore the companion connection and retry. Scheduled or headless runs may have no browser identity: the user can enable "Allow unattributed calls" in the app settings to permit self-contained calls recorded as Unattributed. This does not identify the caller or grant access to another chat’s workspace or processes.'
             )
           )
         : !allowUnattributed && swarmRunning() && identitySensitive && !context.caller.conversationId
         ? Promise.resolve(
-            fail(
+            failIdentity(
               'CALLER_IDENTITY_REQUIRED: this operation needs this chat’s exact workspace, but the connector could not prove which ChatGPT conversation made the call. Retry after the extension reconnects; no file or command was changed.'
             )
           )
@@ -731,6 +799,7 @@ async function dispatchTracked(
         : invokeHandler()
   );
   markTiming('handler');
+  if (identityRefusals.has(result)) rememberIdentityRefusal(requestId, name);
   // Identity, once, from this call's own evidence — see callerConversation. `agents` has
   // already established its own inside the call and adopted it, and re-reading here would
   // only be able to disagree with the stronger answer it waited for.
@@ -774,14 +843,16 @@ async function dispatchTracked(
   const baseResult = surface === 'plugins' && !handlerRan ? pluginManager.redactResult(result) as ToolResult : result;
   let delivered = nested ? baseResult : withUnattributedNotice(
     context.caller.conversationId,
-    withInbox(context.caller.conversationId, context.agent, baseResult, isFinish)
+    withInbox(context.caller.conversationId, context.agent, baseResult, isFinish),
+    context.caller.requestId
   );
   // Ordinary tools carry direct user input, but only the explicit finish signal
   // advances a planned stage. Successful work is not evidence that a stage is done.
-  const userInput = nested ? { messages: [], reminder: '' } : await offerToolInput(context.caller.sessionId, context.caller.conversationId, context.caller.requestId, startedAt, name === 'session_finish' && !result.isError).catch(() => {
+  const userInput: ToolInputBatch = nested ? { messages: [], reminder: '' } : await offerToolInput(context.caller.sessionId, context.caller.conversationId, context.caller.requestId, startedAt, name === 'session_finish' && !result.isError, true).catch(() => {
     logWarn('User input could not be attached; the completed tool result is preserved');
     return { messages: [], reminder: '' };
   });
+  try {
   if (userInput.messages.length) {
     const attachments: ToolResult['content'] = [];
     for (const [index, message] of userInput.messages.entries()) {
@@ -794,12 +865,21 @@ async function dispatchTracked(
   if (!nested && handlerRan && !blockedChat && !supersededConversation && !compacting) {
     delivered = await withBackgroundExecRecovery(context, delivered);
   }
+  if (!nested) delivered = await withIdentityRecoveredNotice(context, delivered);
   if (surface === 'plugins' && delivered.content.length > baseResult.content.length) {
     // All delivery projections above append to the immutable handler result. Only these
     // new app-authored blocks need redacting; traversing its large external payload again
     // wastes work and can make the recorded result differ from what the caller received.
     const added = pluginManager.redactResult({ content: delivered.content.slice(baseResult.content.length) });
     delivered = { ...delivered, content: [...baseResult.content, ...added.content as ToolResult['content']] };
+  }
+  // Some hosts consume structured results instead of content. Core owns these shapes;
+  // project its final app appendices once without changing the underlying tool data.
+  if (surface === 'core' && delivered.structuredContent) {
+    const supplemental = delivered.content.slice(baseResult.content.length)
+      .filter((part): part is Extract<ToolContent, { type: 'text' }> => part.type === 'text')
+      .map(part => part.text).join('\n');
+    if (supplemental) delivered = { ...delivered, structuredContent: { ...delivered.structuredContent, supplemental_context: supplemental } };
   }
   const recorderStartedAt = Date.now();
   // Event duration includes identity/handler/delivery work. Recorder and local HTTP finish
@@ -840,6 +920,9 @@ async function dispatchTracked(
   if (callerRunId) releaseQuiescentRun({}, callerRunId);
   markTiming('recorder', true);
   return delivered;
+  } finally {
+    await userInput.recordHistory?.().catch(() => logWarn('User input history will be retried from its retained delivery receipt'));
+  }
 }
 
 /** Whether this handler must know which chat it is before resolving its paths. */
@@ -937,7 +1020,10 @@ export async function resolveIn(
   });
   // Absolute only: a workspace learned from a relative path would let one loose resolution
   // decide where the next loose resolution points. See workspace.ts.
-  if (isAbsoluteVirtualPath(requested) || isNativeWindowsPath(requested)) await learnWorkspace(resolved);
+  // Loading shared skill instructions must not move the chat away from its project.
+  const skillDirectory = skillsDirectory();
+  const isSkill = resolved.root.name === 'skills' || (skillDirectory !== null && isContained(skillDirectory, resolved.real));
+  if (!isSkill && (isAbsoluteVirtualPath(requested) || isNativeWindowsPath(requested))) await learnWorkspace(resolved);
   return resolved;
 }
 
@@ -1087,7 +1173,13 @@ export function createRegistrar(server: McpServer | null, ctx: ToolContext, surf
       names.push(name);
       handlers.set(name, { description: config.description, run: async args => {
         const parsed = await config.inputSchema.safeParseAsync(args);
-        return parsed.success ? handler(parsed.data) : fail('INVALID_ARGUMENTS: arguments do not match this tool’s schema.');
+        if (parsed.success) return handler(parsed.data);
+        // Preserve the schema owner's corrective explanation for code-mode children too.
+        // Zod issues omit input values; bound paths/messages and the number of diagnostics.
+        const details = parsed.error.issues.slice(0, 3).map(issue =>
+          `${issue.path.map(String).join('.').slice(0, 80) || 'arguments'}: ${issue.message.slice(0, 300)}`
+        ).join('; ');
+        return fail(`INVALID_ARGUMENTS: ${details}`);
       } });
       observe?.(name, config);
       // No identity field is ever added here. Every tool's schema is exactly what its
@@ -1105,9 +1197,12 @@ export function createRegistrar(server: McpServer | null, ctx: ToolContext, surf
     guarded(cap, name, fn) {
       return guard(name, async () => {
         if (!caps[cap]) {
+          // The effective capability can be off because Read-only overrides its checkbox.
+          // Name that owner, otherwise use the same permission label as Settings.
           return fail(
-            `TOOL_DISABLED: ${name} is disabled by the current Chat On Steroids permissions. ` +
-              'Ask the user to enable the permission in the app, then retry. If the tool list in this conversation is stale, start a new chat.'
+            ctx.readOnly && WRITE_CAPABILITIES.includes(cap)
+              ? `TOOL_DISABLED: ${name} is disabled because Read-only mode is on. Ask the user to turn Read-only off in the app, then retry.`
+              : `TOOL_DISABLED: ${name} requires the "${CAPABILITY_LABELS[cap]}" permission. Ask the user to enable "${CAPABILITY_LABELS[cap]}" in the app, then retry.`
           );
         }
         return fn();

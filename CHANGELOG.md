@@ -9,12 +9,50 @@ The app and the `extension/` companion are versioned together. **Reload the
 extension after updating the app**. If their bridge protocols are incompatible,
 the app refuses the extension and asks you to reload the matching copy.
 
+## [2.1.13] — Skills and reliability
+
+- Import text skills through **+ → Skills**, select them from the library, or autocomplete their commands with **/**.
+- Setup now ends with an important ChatGPT tool-approval notice. A one-time reminder appears on the first explicit model-discovery opening and stays pending until acknowledged.
+- Selected skill instructions precede project instructions. The 96,000-character message limit preserves skills and user text while shortening AGENTS.md when necessary.
+- Models can read and install skills in the managed `/skills` directory using the existing Core tools. No skills are preinstalled and no extra MCP tools are required.
+- Includes the updated ChatGPT model-picker support from 2.1.12 for main chats and workers.
+- More reliable request attribution, answer boundaries, recovery, Goal/Loop continuation and worker revival.
+- Clearer plugin, permission and terminal-ownership errors; repeated transport notices stay with their original question.
+- Image injections retain their transcript position and preview when optional asset storage fails; long-turn histories place them after the tool response that carried them.
+- Project openings explicitly name the primary working folder even without AGENTS.md, while permitting task-relevant work elsewhere within current permissions.
+- Setup checks Core's actual Actions list; health checks separate catalog responses from tunnel traffic. Stale calls on the wrong connector no longer imply Core is disabled.
+- Native-source downloads retry bounded transient failures without changing source pins or integrity checks.
+
+## [2.1.12] — Model picker compatibility
+
+- Model discovery tolerates effort-only labels and missing family prefixes in the refreshed ChatGPT picker.
+- Version-menu retirement captions no longer invalidate discovery or selection.
+- Closed-picker observation supports `6 Pro` and checks any visible version against the provider model id.
+- Account availability, exact model/effort confirmation and restoration of the original selection remain required.
+
+**Reload the companion extension and refresh your ChatGPT tabs after updating.**
+
+## [2.1.11] — 2 weeks 6 sol
+
+- Goal/Loop decisions use authored conversation context without recorded tool bodies.
+- API reasoning choices follow the selected OpenRouter model’s supported levels.
+- Reduced renderer memory growth during long-running sessions.
+- Clearer tool-permission and recovered-identity guidance.
+- More reliable plugin discovery, refresh and Windows paths.
+- Deleted conversation history stays deleted after restart.
+
+## [2.1.0] — 6 sol in 2 weeks
+
+- Cleaner setup, compact profiles and better sidebar controls.
+- More reliable Goal/Loop recovery, queued messages and conversation history.
+- Updated runtime, MCP and plugin dependencies.
+
 ## [2.0.10] — 2026-09-15
 
 - Native worker delivery no longer spends its bootstrap lease before an authenticated browser companion is available after app/browser restart.
-- Fresh worker bootstrap binds from route/DOM evidence instead of background-tab timer polling, preventing sent workers from expiring before their conversation id is acknowledged.
-- External subagents now use the fail-closed Oracle browser transport by default, with exact persistent attach approval and connector identity receipts.
-- Legacy external jobs can no longer mutate the running app's browser-profile identity; mismatches fail before a native worker is staged.
+- Fresh worker bootstrap binds from route/DOM evidence instead of background-tab timer polling, preventing sent workers from expiring before its conversation id is acknowledged.
+- External subagents use the fail-closed Oracle browser transport by default, with exact persistent attach approval and connector identity receipts.
+- Legacy external jobs cannot mutate the running app's browser-profile identity; mismatches fail before a native worker is staged.
 
 ## [2.0.9] — they nerfed astra
 
