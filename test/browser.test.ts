@@ -269,7 +269,7 @@ describe('browser-backed ChatGPT commands', () => {
     });
     expect(calls).toEqual([{
       command: browser,
-      args: ['--user-data-dir=/Users/example/AI-Runtimes/cos/account-b/browser', url],
+      args: ['--user-data-dir=' + path.resolve('/Users/example/AI-Runtimes/cos/account-b/browser'), url],
       cwd: '/Applications/Google Chrome.app/Contents/MacOS'
     }]);
   });

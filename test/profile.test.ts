@@ -11,14 +11,14 @@ describe('owner production profiles', () => {
 
   it('resolves one explicit data root and a nested Electron session root', () => {
     expect(resolveProfilePaths({ COS_HOME: '~/AI-Runtimes/cos/account-b' }, '/Users/example')).toEqual({
-      userData: path.join('/Users/example', 'AI-Runtimes/cos/account-b'),
-      sessionData: path.join('/Users/example', 'AI-Runtimes/cos/account-b/electron-session')
+      userData: path.resolve('/Users/example', 'AI-Runtimes/cos/account-b'),
+      sessionData: path.resolve('/Users/example', 'AI-Runtimes/cos/account-b/electron-session')
     });
   });
 
   it('resolves an explicit Chromium identity root without coupling it to Electron state', () => {
     expect(browserProfileDir({ COS_BROWSER_USER_DATA_DIR: '~/AI-Runtimes/cos/a/browser' }, '/Users/example'))
-      .toBe('/Users/example/AI-Runtimes/cos/a/browser');
+      .toBe(path.resolve('/Users/example', 'AI-Runtimes/cos/a/browser'));
     expect(browserProfileDir({}, '/Users/example')).toBeNull();
   });
 
