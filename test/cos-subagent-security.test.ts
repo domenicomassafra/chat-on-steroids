@@ -1,5 +1,7 @@
 import path from 'node:path';
 import os from 'node:os';
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -153,14 +155,24 @@ describe('cos-subagent security controls', () => {
       expect(loaded.legacyProfileDirectory).toBe('Profile 173');
     });
 
-    it('uses the fail-closed Oracle browser transport in the repository profile', async () => {
-      const loaded = await profile();
-      expect(loaded.transport).toBe('oracle-browser');
-      expect(loaded.failClosed).toBe(true);
-      expect(loaded.browserAttachRunning).toBe(true);
-      expect(loaded.browserPersistAttachApproval).toBe(true);
-      expect(loaded.profileDirectory).toBe('Profile 173');
-      expect(loaded.defaultConnector).toBe('Chat On Steroids Core');
+    it('keeps the repository Oracle profile pinned to its owner host without accepting CI runners', async () => {
+      const configured = JSON.parse(await fs.readFile(
+        path.resolve('external-subagent-skill/config/profile.json'), 'utf8'
+      ));
+      expect(configured).toMatchObject({
+        transport: 'oracle-browser',
+        failClosed: true,
+        targetHost: 'mac-studio-dodo',
+        browserAttachRunning: true,
+        browserPersistAttachApproval: true,
+        profileDirectory: 'Profile 173',
+        defaultConnector: 'Chat On Steroids Core'
+      });
+      if (os.hostname() !== configured.targetHost) {
+        await expect(profile()).rejects.toThrow(/refusing host/);
+      } else {
+        await expect(profile()).resolves.toMatchObject(configured);
+      }
     });
 
     it('passes persistent approval in Oracle argv while the app launch omits Oracle flags', async () => {
@@ -321,19 +333,38 @@ describe('cos-subagent security controls', () => {
   });
 
   describe('4. Immutable Oracle provenance and launch admission', () => {
-    it('retains a valid Oracle pin for explicit oracle-browser operation', async () => {
-      const loaded = await profile();
-      await expect(verifyOracleProvenance(loaded)).resolves.toMatchObject({
-        sourceCommit: loaded.oracleSourceCommit,
-        executableSha256: loaded.oracleExecutableSha256
+    // Verify the real SHA-256 and source-commit gates against test-owned bytes, not
+    // the owner-only Oracle executable (which must not exist on shared CI runners).
+    async function provenanceFixture() {
+      const executable = path.join(tempDir, 'oracle-fixture.js');
+      const content = 'inert executable provenance fixture\\n';
+      await fs.writeFile(executable, content);
+      return {
+        oracleExecutable: executable,
+        oracleWorkingDir: process.cwd(),
+        oracleSourceCommit: execFileSync('git', ['rev-parse', 'HEAD'], {
+          cwd: process.cwd(), encoding: 'utf8'
+        }).trim(),
+        oracleExecutableSha256: createHash('sha256').update(content).digest('hex')
+      };
+    }
+
+    it('retains a valid executable digest and exact source commit', async () => {
+      const pinned = await provenanceFixture();
+      await expect(verifyOracleProvenance(pinned)).resolves.toMatchObject({
+        sourceCommit: pinned.oracleSourceCommit,
+        executableSha256: pinned.oracleExecutableSha256
       });
     });
 
-    it('fails closed if the pinned Oracle executable digest is changed', async () => {
-      const loaded = await profile();
+    it('fails closed on a changed Oracle digest or source commit', async () => {
+      const pinned = await provenanceFixture();
       await expect(
-        verifyOracleProvenance({ ...loaded, oracleExecutableSha256: '0'.repeat(64) })
+        verifyOracleProvenance({ ...pinned, oracleExecutableSha256: '0'.repeat(64) })
       ).rejects.toThrow(/Oracle executable digest mismatch/);
+      await expect(
+        verifyOracleProvenance({ ...pinned, oracleSourceCommit: '0'.repeat(40) })
+      ).rejects.toThrow(/Oracle source commit mismatch/);
     });
 
     it('does not admit a launch until spawn is observed and rejects spawn errors', async () => {
